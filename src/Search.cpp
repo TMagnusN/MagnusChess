@@ -25,10 +25,12 @@ SOFTWARE.
 #include "Search.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstring>
 #include <iostream>
 
+#include "Attack.h"
 #include "Evaluation.h"
 #include "MoveGen.h"
 #include "Nnue.h"
@@ -55,9 +57,15 @@ constexpr int REVERSE_FUTILITY_MARGIN[4] = { 0, 90, 180, 300 };
 constexpr int RAZOR_MARGIN[3] = { 0, 280, 420 };
 constexpr int ASPIRATION_DELTA = 24;
 constexpr int REPETITION_AVOID_SCORE = -16;
+constexpr int IIR_MIN_DEPTH = 6;
+constexpr int SEE_PRUNE_DEPTH_LIMIT = 6;
 
 constexpr int piece_order_value[PIECE_TYPE_NB] = {
     100, 320, 330, 500, 900, 0
+};
+
+constexpr int see_piece_value[PIECE_TYPE_NB] = {
+    100, 320, 330, 500, 900, 20000
 };
 
 /*
@@ -238,6 +246,127 @@ struct Searcher {
     [[nodiscard]] inline int repetition_score(const Position& pos) const noexcept {
         const int static_eval = evaluate_position(pos);
         return static_eval > 0 ? REPETITION_AVOID_SCORE : 0;
+    }
+
+    [[nodiscard]] bool see_ge(
+        const Position& pos,
+        Move move,
+        int threshold
+    ) const noexcept {
+        if (!move_is_capture(move))
+            return threshold <= 0;
+
+        const Color us = static_cast<Color>(pos.side_to_move);
+        const Square from = from_sq(move);
+        const Square to = to_sq(move);
+        const PieceType moving = piece_type_on(pos, from);
+        if (!is_ok(moving))
+            return false;
+
+        const PieceType captured = move_is_ep(move)
+            ? PAWN
+            : piece_type_on(pos, to);
+        if (!is_ok(captured))
+            return false;
+
+        int balance = see_piece_value[captured] - threshold;
+        PieceType next_victim = moving;
+
+        if (move_is_promotion(move)) {
+            const PieceType promo = promo_piece(move);
+            if (!is_ok(promo))
+                return false;
+            balance += see_piece_value[promo] - see_piece_value[PAWN];
+            next_victim = promo;
+        }
+
+        if (balance < 0)
+            return false;
+
+        balance -= see_piece_value[next_victim];
+        if (balance >= 0)
+            return true;
+
+        Bitboard occupied = pos.occupied ^ bb_of(from);
+        if (move_is_ep(move)) {
+            const Square cap_sq = (us == WHITE) ? (to - 8) : (to + 8);
+            occupied ^= bb_of(cap_sq);
+        } else {
+            occupied ^= bb_of(to);
+        }
+
+        const Bitboard bishop_like = pos.piece_bb[BISHOP] | pos.piece_bb[QUEEN];
+        const Bitboard rook_like = pos.piece_bb[ROOK] | pos.piece_bb[QUEEN];
+        Bitboard attackers = attackers_to(pos, mem, to, occupied);
+
+        Color side = static_cast<Color>(us ^ 1);
+        while (true) {
+            attackers &= occupied;
+            const Bitboard side_attackers = attackers & pos.color_bb[side];
+            if (side_attackers == 0ULL)
+                break;
+
+            PieceType attacker = PIECE_TYPE_NONE;
+            Bitboard from_set = 0ULL;
+
+            Bitboard by_pt = side_attackers & pos.piece_bb[PAWN];
+            if (by_pt) {
+                attacker = PAWN;
+                from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
+            } else {
+                by_pt = side_attackers & pos.piece_bb[KNIGHT];
+                if (by_pt) {
+                    attacker = KNIGHT;
+                    from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
+                } else {
+                    by_pt = side_attackers & pos.piece_bb[BISHOP];
+                    if (by_pt) {
+                        attacker = BISHOP;
+                        from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
+                    } else {
+                        by_pt = side_attackers & pos.piece_bb[ROOK];
+                        if (by_pt) {
+                            attacker = ROOK;
+                            from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
+                        } else {
+                            by_pt = side_attackers & pos.piece_bb[QUEEN];
+                            if (by_pt) {
+                                attacker = QUEEN;
+                                from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
+                            } else {
+                                by_pt = side_attackers & pos.piece_bb[KING];
+                                if (by_pt) {
+                                    attacker = KING;
+                                    from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (attacker == PIECE_TYPE_NONE)
+                break;
+
+            occupied ^= from_set;
+
+            if (attacker == PAWN || attacker == BISHOP || attacker == QUEEN)
+                attackers |= bishop_attacks(mem, to, occupied) & bishop_like;
+            if (attacker == ROOK || attacker == QUEEN)
+                attackers |= rook_attacks(mem, to, occupied) & rook_like;
+
+            attackers &= occupied;
+            balance = see_piece_value[attacker] - balance;
+            side = static_cast<Color>(side ^ 1);
+
+            if (balance >= 0) {
+                if (attacker == KING && (attackers & pos.color_bb[side]) != 0ULL)
+                    side = static_cast<Color>(side ^ 1);
+                break;
+            }
+        }
+
+        return side != us;
     }
 
     [[nodiscard]] bool has_non_pawn_material(
@@ -521,6 +650,12 @@ struct Searcher {
 
             ++legal_count;
 
+            if (!checked &&
+                !move_is_promotion(move) &&
+                !see_ge(pos, move, -DELTA_MARGIN)) {
+                continue;
+            }
+
             if (!checked && !move_is_promotion(move)) {
                 // Delta pruning skips captures that cannot reasonably raise alpha.
                 const int max_gain = capture_gain_estimate(pos, move);
@@ -595,20 +730,27 @@ struct Searcher {
         const int alpha0 = alpha;
         const bool pv_node = (beta - alpha) > 1;
         const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
+        const Move tt_move = tt_move_from_probe(probe);
+
+        int search_depth = depth;
+        if (!pv_node &&
+            search_depth >= IIR_MIN_DEPTH &&
+            move_is_none(tt_move)) {
+            --search_depth;
+        }
 
         int tt_score = 0;
-        if (tt_cutoff(probe, depth, alpha, beta, ply, tt_score))
+        if (tt_cutoff(probe, search_depth, alpha, beta, ply, tt_score))
             return tt_score;
 
-        const Move tt_move = tt_move_from_probe(probe);
         const int static_eval = probe.hit ? probe.data.eval : evaluate_position(pos);
         const bool checked = in_check(pos);
         const Color side = static_cast<Color>(pos.side_to_move);
 
         if (!pv_node &&
             !checked &&
-            depth <= 2 &&
-            static_eval + RAZOR_MARGIN[depth] <= alpha) {
+            search_depth <= 2 &&
+            static_eval + RAZOR_MARGIN[search_depth] <= alpha) {
             // Razoring: at very shallow depth, a bad static eval can defer to qsearch.
             const int score = qsearch(pos, alpha, beta, ply);
             if (score <= alpha)
@@ -617,9 +759,9 @@ struct Searcher {
 
         if (!pv_node &&
             !checked &&
-            depth <= 3 &&
+            search_depth <= 3 &&
             !is_mate_window(beta) &&
-            static_eval - REVERSE_FUTILITY_MARGIN[depth] >= beta) {
+            static_eval - REVERSE_FUTILITY_MARGIN[search_depth] >= beta) {
             // Reverse futility: when static eval is already safely above beta,
             // a shallow node often does not need a full search.
             return static_eval;
@@ -628,7 +770,7 @@ struct Searcher {
         if (allow_null &&
             !pv_node &&
             !checked &&
-            depth >= 3 &&
+            search_depth >= 3 &&
             !is_mate_window(beta) &&
             static_eval >= beta &&
             has_non_pawn_material(pos, side)) {
@@ -637,10 +779,10 @@ struct Searcher {
             Position null_pos = pos;
             do_null_move(null_pos);
 
-            const int reduction = null_reduction(depth);
+            const int reduction = null_reduction(search_depth);
             const int score = -pvs(
                 null_pos,
-                depth - 1 - reduction,
+                search_depth - 1 - reduction,
                 -beta,
                 -beta + 1,
                 ply + 1,
@@ -648,7 +790,7 @@ struct Searcher {
             );
 
             if (score >= beta) {
-                save_tt(pos, depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
+                save_tt(pos, search_depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
                 return score;
             }
         }
@@ -683,6 +825,9 @@ struct Searcher {
                 !move_is_capture(move) &&
                 !move_is_promotion(move) &&
                 !move_is_castle(move);
+            const bool simple_capture =
+                move_is_capture(move) &&
+                !move_is_promotion(move);
             const int history_score = quiet_move
                 ? history[side][piece_type_on(pos, from_sq(move))][to_sq(move)]
                 : 0;
@@ -692,18 +837,28 @@ struct Searcher {
 
             if (!pv_node &&
                 !checked &&
-                depth <= 2 &&
+                search_depth <= SEE_PRUNE_DEPTH_LIMIT &&
+                simple_capture &&
+                i > 1 &&
+                !see_ge(pos, move, -60 * search_depth)) {
+                // Bad capture pruning: skip late captures that fail a SEE threshold.
+                continue;
+            }
+
+            if (!pv_node &&
+                !checked &&
+                search_depth <= 2 &&
                 quiet_move &&
-                static_eval + FUTILITY_MARGIN[depth] <= alpha) {
+                static_eval + FUTILITY_MARGIN[search_depth] <= alpha) {
                 // Shallow futility pruning skips quiet moves that cannot raise alpha.
                 continue;
             }
 
             if (!pv_node &&
                 !checked &&
-                depth <= 4 &&
+                search_depth <= 4 &&
                 quiet_move &&
-                quiet_count > lmp_limit(depth) &&
+                quiet_count > lmp_limit(search_depth) &&
                 static_eval <= alpha) {
                 // Late move pruning drops very late quiets once enough earlier
                 // quiets have already been searched with no improvement.
@@ -712,10 +867,10 @@ struct Searcher {
 
             if (!pv_node &&
                 !checked &&
-                depth <= 4 &&
+                search_depth <= 4 &&
                 quiet_move &&
-                quiet_count > lmp_limit(depth) / 2 &&
-                history_score <= history_prune_threshold(depth)) {
+                quiet_count > lmp_limit(search_depth) / 2 &&
+                history_score <= history_prune_threshold(search_depth)) {
                 // History pruning removes quiets that are both late and historically bad.
                 continue;
             }
@@ -726,19 +881,19 @@ struct Searcher {
 
             int score = 0;
             if (!searched_first) {
-                score = -pvs(pos, depth - 1, -beta, -alpha, ply + 1, true);
+                score = -pvs(pos, search_depth - 1, -beta, -alpha, ply + 1, true);
                 searched_first = true;
             } else {
                 if (!pv_node &&
                     !checked &&
                     quiet_move &&
-                    depth >= 3 &&
+                    search_depth >= 3 &&
                     i >= 3) {
                     // Late Move Reductions search late quiets at a reduced depth first.
-                    const int reduction = lmr_reduction(depth, i);
+                    const int reduction = lmr_reduction(search_depth, i);
                     score = -pvs(
                         pos,
-                        depth - 1 - reduction,
+                        search_depth - 1 - reduction,
                         -alpha - 1,
                         -alpha,
                         ply + 1,
@@ -748,15 +903,15 @@ struct Searcher {
                     if (score > alpha)
                         // If the reduced search still looks interesting, restore
                         // the original depth and test it again on a narrow window.
-                        score = -pvs(pos, depth - 1, -alpha - 1, -alpha, ply + 1, true);
+                        score = -pvs(pos, search_depth - 1, -alpha - 1, -alpha, ply + 1, true);
                 } else {
-                    score = -pvs(pos, depth - 1, -alpha - 1, -alpha, ply + 1, true);
+                    score = -pvs(pos, search_depth - 1, -alpha - 1, -alpha, ply + 1, true);
                 }
 
                 if (score > alpha && score < beta)
                     // A null-window fail-high inside the PV must be confirmed by
                     // a full-window re-search before the score is trusted.
-                    score = -pvs(pos, depth - 1, -beta, -alpha, ply + 1, true);
+                    score = -pvs(pos, search_depth - 1, -beta, -alpha, ply + 1, true);
             }
 
             unmake_move(pos, move, mem.tables, st);
@@ -779,7 +934,7 @@ struct Searcher {
 
         if (legal_count == 0) {
             const int score = checked ? (-VALUE_MATE + ply) : 0;
-            save_tt(pos, depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
+            save_tt(pos, search_depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
             return score;
         }
 
@@ -787,11 +942,11 @@ struct Searcher {
             alpha > alpha0 &&
             best_move != 0 &&
             !move_is_capture(best_move)) {
-            bonus_history(pos, best_move, std::max(1, depth - 1));
-            penalize_quiets(pos, searched_quiets, searched_quiet_count, best_move, std::max(1, depth - 1));
+            bonus_history(pos, best_move, std::max(1, search_depth - 1));
+            penalize_quiets(pos, searched_quiets, searched_quiet_count, best_move, std::max(1, search_depth - 1));
         }
 
-        save_tt(pos, depth, ply, alpha, static_eval, best_move, alpha0, beta, pv_node);
+        save_tt(pos, search_depth, ply, alpha, static_eval, best_move, alpha0, beta, pv_node);
         return alpha;
     }
 
