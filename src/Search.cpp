@@ -60,11 +60,16 @@ constexpr int ASPIRATION_DELTA = 24;
 constexpr int REPETITION_AVOID_SCORE = -16;
 constexpr int IIR_MIN_DEPTH = 6;
 constexpr int SEE_PRUNE_DEPTH_LIMIT = 6;
+constexpr int IMPROVING_MARGIN = 16;
 constexpr int CAPTURE_HISTORY_HIGH_THRESHOLD = 128;
 constexpr int CAPTURE_TOPK = 3;
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH = 4;
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH = 8;
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX = 4;
+constexpr int QUIET_LMR_STRONG_ORDERING_SCORE = 2048;
+constexpr int QUIET_LMR_WEAK_ORDERING_SCORE = -512;
+constexpr int QUIET_LMR_STRONG_HISTORY_SCORE = 192;
+constexpr int QUIET_LMR_WEAK_HISTORY_SCORE = -192;
 
 #ifndef VALERAIN_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD
 #define VALERAIN_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD -60
@@ -131,6 +136,8 @@ struct Searcher {
     int pv_length[MAX_PLY + 1]{};
     Key rep_keys[MAX_PLY + 1]{};
     Move move_stack[MAX_PLY]{};
+    int static_eval_stack[MAX_PLY + 1]{};
+    bool static_eval_valid[MAX_PLY + 1]{};
     clock::time_point start_time{};
     bool stopped = false;
     bool hard_stop = false;
@@ -573,11 +580,35 @@ struct Searcher {
         return gain;
     }
 
-    // Fixed schedules avoid expensive formulas for lightweight pruning.
-    [[nodiscard]] static inline int quiet_lmr_reduction(int depth, int move_index) noexcept {
-        if (depth >= 6 && move_index >= 6)
-            return 2;
-        return 1;
+    // Quiet LMR keeps the schedule light, but now also reacts to quiet quality
+    // and whether the static eval is improving for the side to move.
+    [[nodiscard]] static inline int quiet_lmr_reduction(
+        int depth,
+        int move_index,
+        int quiet_ordering_score,
+        int quiet_history_score,
+        bool improving
+    ) noexcept {
+        int reduction = (depth >= 6 && move_index >= 6) ? 2 : 1;
+
+        const bool strong_quiet =
+            quiet_ordering_score >= QUIET_LMR_STRONG_ORDERING_SCORE ||
+            quiet_history_score >= QUIET_LMR_STRONG_HISTORY_SCORE;
+        const bool weak_quiet =
+            quiet_ordering_score <= QUIET_LMR_WEAK_ORDERING_SCORE &&
+            quiet_history_score <= QUIET_LMR_WEAK_HISTORY_SCORE;
+
+        if (strong_quiet)
+            --reduction;
+        else if (weak_quiet)
+            ++reduction;
+
+        if (improving)
+            --reduction;
+        else if (weak_quiet && depth >= 6 && move_index >= 8)
+            ++reduction;
+
+        return std::clamp(reduction, 0, 2);
     }
 
     [[nodiscard]] static inline bool capture_lmr_eligible(int depth, int simple_capture_index) noexcept {
@@ -711,6 +742,20 @@ struct Searcher {
         if (use_nnue())
             return nnue::to_cp(nnue::eval(pos), pos);
         return eval::evaluate(pos);
+    }
+
+    inline void store_static_eval(int ply, int static_eval) noexcept {
+        static_eval_stack[ply] = static_eval;
+        static_eval_valid[ply] = true;
+    }
+
+    [[nodiscard]] inline bool improving_position(
+        int ply,
+        int static_eval
+    ) const noexcept {
+        if (ply < 2 || !static_eval_valid[ply - 2])
+            return false;
+        return static_eval >= static_eval_stack[ply - 2] + IMPROVING_MARGIN;
     }
 
     [[nodiscard]] bool is_threefold_repetition(
@@ -950,6 +995,7 @@ struct Searcher {
         const bool checked = in_check(pos);
         const Move tt_move = tt_move_from_probe(probe);
         const int static_eval = probe.hit ? probe.data.eval : evaluate_position(pos);
+        store_static_eval(ply, static_eval);
 
         if (!checked) {
             // Stand-pat: if the static position already fails high, no capture
@@ -1096,7 +1142,9 @@ struct Searcher {
             return tt_score;
 
         const int static_eval = probe.hit ? probe.data.eval : evaluate_position(pos);
+        store_static_eval(ply, static_eval);
         const bool checked = in_check(pos);
+        const bool improving = !checked && improving_position(ply, static_eval);
         const Color side = static_cast<Color>(pos.side_to_move);
 
         if (!pv_node &&
@@ -1245,6 +1293,9 @@ struct Searcher {
             const int history_score = quiet_move
                 ? history_tables.quiet_value_fast(pos, move)
                 : 0;
+            const int quiet_ordering_score = quiet_move
+                ? picker.last_score()
+                : 0;
 #if VALERAIN_MOVEPICKER_OBS
             const bool first_move_this = (moves_tried == 1);
             const MoveStageBucket stage_bucket = classify_stage_bucket(
@@ -1381,7 +1432,13 @@ struct Searcher {
                     search_depth >= 3 &&
                     move_index >= 3) {
                     // Late Move Reductions search late quiets at a reduced depth first.
-                    const int reduction = quiet_lmr_reduction(search_depth, move_index);
+                    const int reduction = quiet_lmr_reduction(
+                        search_depth,
+                        move_index,
+                        quiet_ordering_score,
+                        history_score,
+                        improving
+                    );
                     score = -pvs(
                         pos,
                         search_depth - 1 - reduction,
@@ -1728,6 +1785,11 @@ SearchResult iterative_deepening(
             searcher.base_nodes = total_nodes + depth_nodes;
             std::fill(std::begin(searcher.pv_length), std::end(searcher.pv_length), 0);
             std::fill(std::begin(searcher.move_stack), std::end(searcher.move_stack), Move(0));
+            std::fill(
+                std::begin(searcher.static_eval_valid),
+                std::end(searcher.static_eval_valid),
+                false
+            );
 
             current = searcher.search_root(keyed_root, depth, hint_move, alpha, beta);
             depth_nodes += current.nodes;
