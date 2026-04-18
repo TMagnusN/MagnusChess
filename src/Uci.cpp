@@ -34,6 +34,7 @@ SOFTWARE.
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <streambuf>
 #include <thread>
 
 #include "Attack.h"
@@ -243,6 +244,116 @@ inline void push_position_history(
     }
 
     return false;
+}
+
+class PvTrackingStreamBuf final : public std::streambuf {
+public:
+    explicit PvTrackingStreamBuf(std::streambuf* sink) noexcept
+        : sink_(sink) {}
+
+    ~PvTrackingStreamBuf() override {
+        flush_pending_line();
+    }
+
+    [[nodiscard]] std::string_view last_pv() const noexcept {
+        return last_pv_;
+    }
+
+protected:
+    int overflow(int ch) override {
+        if (ch == traits_type::eof())
+            return sync() == 0 ? traits_type::not_eof(ch) : traits_type::eof();
+
+        const char c = static_cast<char>(ch);
+        append_char(c);
+        return sink_ != nullptr ? sink_->sputc(c) : ch;
+    }
+
+    std::streamsize xsputn(
+        const char* s,
+        std::streamsize count
+    ) override {
+        for (std::streamsize i = 0; i < count; ++i)
+            append_char(s[i]);
+
+        return sink_ != nullptr ? sink_->sputn(s, count) : count;
+    }
+
+    int sync() override {
+        flush_pending_line();
+        return sink_ != nullptr ? sink_->pubsync() : 0;
+    }
+
+private:
+    void append_char(char c) {
+        if (c == '\n') {
+            flush_pending_line();
+            return;
+        }
+
+        if (c != '\r')
+            line_buffer_.push_back(c);
+    }
+
+    void flush_pending_line() {
+        if (line_buffer_.empty())
+            return;
+
+        process_line();
+        line_buffer_.clear();
+    }
+
+    void process_line() {
+        const std::string_view line{line_buffer_};
+        if (line.rfind("info ", 0) != 0)
+            return;
+
+        constexpr std::string_view pv_marker = " pv ";
+        const std::size_t pv_pos = line.find(pv_marker);
+        if (pv_pos == std::string_view::npos)
+            return;
+
+        const std::size_t pv_begin = pv_pos + pv_marker.size();
+        if (pv_begin >= line.size())
+            return;
+
+        last_pv_.assign(line.substr(pv_begin));
+    }
+
+    std::streambuf* sink_ = nullptr;
+    std::string line_buffer_{};
+    std::string last_pv_{};
+};
+
+[[nodiscard]] std::string ponder_move_from_last_pv(
+    const Position& root,
+    const memory::Memory& mem,
+    Move best_move,
+    std::string_view last_pv
+) noexcept {
+    if (move_is_none(best_move) || last_pv.empty())
+        return {};
+
+    std::istringstream pv_stream{std::string(last_pv)};
+    std::string best_token;
+    std::string ponder_token;
+    if (!(pv_stream >> best_token >> ponder_token))
+        return {};
+
+    Move pv_best_move = 0;
+    if (!find_uci_move(root, mem, best_token, pv_best_move) ||
+        pv_best_move != best_move) {
+        return {};
+    }
+
+    Position after_best = root;
+    do_move_copy(after_best, best_move, mem.tables);
+
+    Move ponder_move = 0;
+    if (!find_uci_move(after_best, mem, ponder_token, ponder_move))
+        return {};
+
+    return search::move_to_uci(ponder_move);
 }
 
 [[nodiscard]] bool parse_fen(
@@ -821,9 +932,12 @@ struct UciSession {
         const Position root = pos;
         search_running.store(true, std::memory_order_release);
         search_thread = std::thread([this, root, limits]() {
+            PvTrackingStreamBuf pv_tracking_buf(std::cout.rdbuf());
+            std::ostream tracked_out(&pv_tracking_buf);
             const auto search_start = std::chrono::steady_clock::now();
             const search::SearchResult result =
-                search::iterative_deepening(root, mem, limits, &std::cout);
+                search::iterative_deepening(root, mem, limits, &tracked_out);
+            tracked_out.flush();
             const auto search_end = std::chrono::steady_clock::now();
             const int elapsed_ms = static_cast<int>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -832,7 +946,17 @@ struct UciSession {
             );
             time_manager.record_search(root, limits, result, elapsed_ms);
 
-            std::cout << "bestmove " << search::move_to_uci(result.best_move) << '\n';
+            const std::string ponder = ponder_move_from_last_pv(
+                root,
+                mem,
+                result.best_move,
+                pv_tracking_buf.last_pv()
+            );
+
+            std::cout << "bestmove " << search::move_to_uci(result.best_move);
+            if (!ponder.empty())
+                std::cout << " ponder " << ponder;
+            std::cout << '\n';
             search_running.store(false, std::memory_order_release);
         });
     }
