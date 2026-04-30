@@ -79,7 +79,7 @@ constexpr int RFP_TT_CAPTURE_MARGIN_REDUCTION = 16;
 constexpr int RFP_TT_QUIET_FAIL_HIGH_BONUS = 24;
 constexpr int RAZOR_MARGIN[3] = { 0, 280, 420 };
 constexpr int ASPIRATION_DELTA = 24;
-constexpr int REPETITION_AVOID_SCORE = -16;
+constexpr int REPETITION_AVOID_BASE = 16;
 constexpr int IIR_MIN_DEPTH = 6;
 constexpr int SEE_PRUNE_DEPTH_LIMIT = 6;
 constexpr int IMPROVING_MARGIN = 16;
@@ -117,7 +117,11 @@ constexpr int CORRECTION_WEIGHT_SUM =
 #endif
 
 #ifndef VALERAIN_ENABLE_PROBCUT
-#define VALERAIN_ENABLE_PROBCUT 1
+#define VALERAIN_ENABLE_PROBCUT 0
+#endif
+
+#ifndef VALERAIN_ENABLE_SMALL_PROBCUT
+#define VALERAIN_ENABLE_SMALL_PROBCUT 0
 #endif
 
 #ifndef VALERAIN_ENABLE_SINGULAR_EXTENSION
@@ -1141,6 +1145,39 @@ struct Searcher {
         return false;
     }
 
+    [[nodiscard]] bool has_upcoming_repetition(
+        Position& pos,
+        const GenInfo& info,
+        int ply
+    ) noexcept {
+        if (limits.contempt == 0 || pos.halfmove_clock < 4)
+            return false;
+
+        MoveList quiets{};
+        Move* qend = generate_pseudo_quiets(pos, mem, info, quiets.moves);
+        quiets.size = static_cast<int>(qend - quiets.moves);
+
+        for (int i = 0; i < quiets.size; ++i) {
+            const Move move = quiets.moves[i];
+            if (move_is_castle(move))
+                continue;
+            if (piece_type_on(pos, from_sq(move)) == PAWN)
+                continue;
+            if (!legal_fast(pos, mem, info, move))
+                continue;
+
+            StateInfo st;
+            make_move(pos, move, mem.tables, st);
+            const bool repeats = is_repetition_draw(pos, ply + 1);
+            unmake_move(pos, move, mem.tables, st);
+
+            if (repeats)
+                return true;
+        }
+
+        return false;
+    }
+
     [[nodiscard]] inline int draw_score(int side_to_move) const noexcept {
         const int random_component = static_cast<int>(nodes & 0x3ULL) - 2;
         const int contempt_component =
@@ -1155,7 +1192,17 @@ struct Searcher {
         const int base_draw = draw_score(side_to_move);
         if (eval_hint == VALUE_NONE)
             return base_draw;
-        return base_draw + (eval_hint > 0 ? REPETITION_AVOID_SCORE : 0);
+
+        const int avoid_swing = std::max(
+            REPETITION_AVOID_BASE,
+            std::min(std::abs(limits.contempt), 128)
+        );
+
+        if (eval_hint > 0)
+            return base_draw - avoid_swing;
+        if (eval_hint < 0)
+            return base_draw + avoid_swing / 2;
+        return base_draw;
     }
 
     [[nodiscard]] bool has_null_move_pruning_material(
@@ -1751,6 +1798,16 @@ struct Searcher {
         GenInfo info;
         init_gen_info(info, pos, mem);
 
+        if (!pv_node) {
+            const int draw_floor = draw_score(pos.side_to_move);
+            if (alpha < draw_floor &&
+                has_upcoming_repetition(pos, info, ply)) {
+                alpha = draw_floor;
+                if (alpha >= beta)
+                    return alpha;
+            }
+        }
+
 #if VALERAIN_ENABLE_PROBCUT
         if (!pv_node &&
             !checked &&
@@ -1823,6 +1880,7 @@ struct Searcher {
         }
 #endif
 
+#if VALERAIN_ENABLE_SMALL_PROBCUT
         // Small ProbCut: zero-cost TT-based cutoff.
         // If TT already has a high lower-bound entry far above beta,
         // we can return immediately without generating any moves.
@@ -1838,6 +1896,7 @@ struct Searcher {
                 return small_probcut_beta;
             }
         }
+#endif
 
         const Move prev_move = (ply > 0) ? move_stack[ply - 1] : Move(0);
         const Move prev2_move = (ply > 1) ? move_stack[ply - 2] : Move(0);
@@ -2562,6 +2621,11 @@ struct Searcher {
 
         if (best_score == -VALUE_INF)
             best_score = alpha;
+
+        if (pv_length[0] == 0) {
+            pv_table[0][0] = result.best_move;
+            pv_length[0] = 1;
+        }
 
         if (!checked &&
             !is_mate_window(best_score) &&
@@ -3305,6 +3369,7 @@ std::string move_to_uci(Move m) {
         for (int depth = 1; depth <= max_depth; ++depth) {
             SearchResult current{};
             u64 depth_nodes = 0;
+            int depth_max_seldepth = 0;
 
             int alpha = -VALUE_INF;
             int beta = VALUE_INF;
@@ -3322,7 +3387,8 @@ std::string move_to_uci(Move m) {
                 reset_searcher_iteration(searcher, search_start, total_nodes + depth_nodes);
 
                 current = searcher.search_root(keyed_root, depth, hint_move, alpha, beta);
-                current.seldepth = searcher.seldepth;
+                depth_max_seldepth = std::max(depth_max_seldepth, searcher.seldepth);
+                current.seldepth = depth_max_seldepth;
                 depth_nodes += current.nodes;
 
                 if (searcher.stopped || depth == 1)
@@ -3496,6 +3562,7 @@ std::string move_to_uci(Move m) {
         Move hint_move = 0;
         Position keyed_root = local_root;
         position_refresh_key(keyed_root, searcher.mem.tables);
+        searcher.root_side_to_move = keyed_root.side_to_move;
         const auto search_start = Searcher::clock::now();
         searcher.start_time = search_start;
         u64 total_nodes = 0;
@@ -3513,6 +3580,7 @@ std::string move_to_uci(Move m) {
         for (int depth = 1; depth <= max_depth; ++depth) {
             SearchResult current{};
             u64 depth_nodes = 0;
+            int depth_max_seldepth = 0;
 
             int alpha = -VALUE_INF;
             int beta = VALUE_INF;
@@ -3530,7 +3598,8 @@ std::string move_to_uci(Move m) {
                 reset_searcher_iteration(searcher, search_start, total_nodes + depth_nodes);
 
                 current = searcher.search_root(keyed_root, depth, hint_move, alpha, beta);
-                current.seldepth = searcher.seldepth;
+                depth_max_seldepth = std::max(depth_max_seldepth, searcher.seldepth);
+                current.seldepth = depth_max_seldepth;
                 depth_nodes += current.nodes;
 
                 if (searcher.stopped || depth == 1)

@@ -178,6 +178,14 @@ int see_value_fast(
         if (attacker == ROOK || attacker == QUEEN)
             attackers |= rook_attacks(mem, to, occupied) & rook_like;
 
+        if (attacker == KING) {
+            const Color them = static_cast<Color>(side ^ 1);
+            if ((attackers & occupied & color_bb[them]) != 0ULL) {
+                --depth;
+                break;
+            }
+        }
+
         side = static_cast<Color>(side ^ 1);
     }
 
