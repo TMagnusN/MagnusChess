@@ -508,7 +508,7 @@ struct UciSession {
     void emit_uci_id(std::ostream& out) const {
         out << "id name MagnusChess 0.1.1\n";
         out << "id author Magnus\n";
-        out << "option name Hash type spin default 64 min 1 max 1048576\n";
+        out << "option name Hash type spin default 16 min 1 max 1048576\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
         out << "option name Contempt type spin default " << DEFAULT_UCI_CONTEMPT
             << " min " << MIN_UCI_CONTEMPT
