@@ -3230,11 +3230,23 @@ void emit_iteration_info(
         }
 
         if (stopped_mid_depth) {
-#if MAGNUS_SEARCHSTATS_OBS
             if (local_out != nullptr && searcher.limits.report_info) {
                 const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
                     ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
                     : total_nodes;
+                emit_iteration_info(
+                    *local_out,
+                    searcher.mem,
+                    keyed_root,
+                    searcher,
+                    best,
+                    result.pv,
+                    result.pv_length,
+                    search_start,
+                    reported_nodes,
+                    best.depth
+                );
+#if MAGNUS_SEARCHSTATS_OBS
                 const u64 reported_depth_nodes =
                     reported_nodes >= last_reported_nodes
                         ? reported_nodes - last_reported_nodes
@@ -3249,8 +3261,8 @@ void emit_iteration_info(
                     stats_before,
                     searcher.stats
                 );
-            }
 #endif
+            }
             break;
         }
 
