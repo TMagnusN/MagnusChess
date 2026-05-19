@@ -19,6 +19,3 @@ Thumbs.db
 *.log
 *.swp
 
-# Binaries and local settings
-src/bin/MagnusChess
-src/bin/.claude/
