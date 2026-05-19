@@ -5,9 +5,11 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
+    name: Build Linux binary
     runs-on: ubuntu-latest
 
     steps:
@@ -19,6 +21,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential
 
+      - name: Show runner info
+        run: |
+          echo "CPU cores: $(nproc)"
+          g++ --version
+          lscpu | grep -E 'Model name|CPU\(s\)|Thread|Core|Architecture' || true
+          free -h
+
       - name: Build
         working-directory: ./src
-        run: make
+        run: make -j"$(nproc)"
+
+      - name: Smoke test
+        working-directory: ./src
+        run: |
+          echo "uci" | timeout 5s ./bin/MagnusChess || true
+
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          cp src/bin/MagnusChess dist/
+          tar -czf MagnusChess-linux.tar.gz -C dist MagnusChess
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MagnusChess-linux
+          path: MagnusChess-linux.tar.gz
