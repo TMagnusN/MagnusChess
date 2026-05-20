@@ -295,6 +295,7 @@ struct Searcher {
     clock::time_point start_time{};
     bool stopped = false;
     bool hard_stop = false;
+    bool stop_on_ponderhit = false;  // time expired during ponder, stop on next ponderhit
     int nmp_min_ply = 0;
 #if MAGNUS_SEARCHSTATS_OBS
     SearchStats stats{};
@@ -997,12 +998,21 @@ struct Searcher {
             return true;
         }
 
-        if (!limits.infinite &&
-            !pondering_active() &&
-            limits.hard_time_ms > 0 &&
-            timed_elapsed_ms() >= limits.hard_time_ms) {
+        if (stop_on_ponderhit && !pondering_active()) {
             stopped = true;
             hard_stop = true;
+            return true;
+        }
+
+        if (!limits.infinite &&
+            limits.hard_time_ms > 0 &&
+            timed_elapsed_ms() >= limits.hard_time_ms) {
+            if (pondering_active()) {
+                stop_on_ponderhit = true;
+            } else {
+                stopped = true;
+                hard_stop = true;
+            }
             return true;
         }
 
@@ -2825,13 +2835,25 @@ struct IterationTimeState {
 
     bool should_stop = false;
 
+    // While pondering, skip ALL time management — the search runs
+    // unbounded until the GUI sends stop or ponderhit.
+    if (searcher.pondering_active())
+        return false;
+
+    // When a previous ponder time-budget exhausted and ponderhit arrived:
+    // stop immediately at the next iteration boundary.
+    if (searcher.stop_on_ponderhit) {
+        searcher.stopped = true;
+        searcher.hard_stop = true;
+        return true;
+    }
+
     // Fixed-time grace: simple depth-boundary stop for go movetime.
     // When the sf-style clock is disabled but a hard limit exists, avoid
     // launching a new depth with essentially zero remaining budget
     // (the hard-limit poll will kill it before a single move is searched).
     if (!use_stockfish_style_time_management(searcher.limits) &&
         searcher.limits.hard_time_ms > 0 &&
-        !searcher.pondering_active() &&
         time_state.last_depth_time_ms > 0) {
         const int elapsed = searcher.timed_elapsed_ms();
         const int remaining = searcher.limits.hard_time_ms - elapsed;
@@ -2841,8 +2863,7 @@ struct IterationTimeState {
             should_stop = true;
     }
 
-    if (use_stockfish_style_time_management(searcher.limits) &&
-        !searcher.pondering_active()) {
+    if (use_stockfish_style_time_management(searcher.limits)) {
         // SPSA-tuned time management: falling-eval scaling, sigmoid depth factor,
         // and best-move instability combine to adjust soft-time allocation.
         double falling_eval =
@@ -3122,6 +3143,7 @@ void emit_iteration_info(
     searcher.root_side_to_move = keyed_root.side_to_move;
     const auto search_start = Searcher::clock::now();
     searcher.start_time = search_start;
+    searcher.stop_on_ponderhit = false;
     u64 total_nodes = 0;
     int prev_depth_end_ms = 0;  // for fixed-time per-depth cost tracking
 #if MAGNUS_SEARCHSTATS_OBS
@@ -3297,6 +3319,19 @@ void emit_iteration_info(
 
         if (searcher.stop_after_completed_depth())
             break;
+    }
+
+    // Ponder busy-wait: after the depth loop finishes (e.g. MAX_PLY reached),
+    // keep the search "alive" until stop or ponderhit arrives.
+    if (searcher.limits.ponder && !searcher.stopped) {
+        while (!searcher.stopped && searcher.pondering_active()) {
+            searcher.publish_nodes();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (searcher.stop_on_ponderhit) {
+            searcher.stopped = true;
+            searcher.hard_stop = true;
+        }
     }
 
     searcher.publish_nodes();
