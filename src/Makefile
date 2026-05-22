@@ -99,11 +99,26 @@ BASE_CXXFLAGS := \
 
 LINK_OPT_LEVEL ?= 3
 
+# Stack reserve size.
+# 1 GiB = 1024^3 = 1073741824 bytes.
+# Do not set this to tens of TiB: each created thread may reserve stack address space,
+# which can make the executable fail at runtime or make std::thread throw std::system_error.
+STACK_SIZE_BYTES ?= 1073741824
+
+ifeq ($(OS),Windows_NT)
+	# MinGW / GNU ld PE stack reserve.
+	STACK_LDFLAGS := -Wl,--stack,$(STACK_SIZE_BYTES)
+else
+	# ELF GNU ld stack-size note.
+	STACK_LDFLAGS := -Wl,-z,stack-size=$(STACK_SIZE_BYTES)
+endif
+
 BASE_LDFLAGS := \
 	$(ARCH_FLAGS) \
 	-Ofast \
 	-flto=auto \
-	-Wl,-O$(LINK_OPT_LEVEL)
+	-Wl,-O$(LINK_OPT_LEVEL) \
+	$(STACK_LDFLAGS)
 
 PGO_GENERATE_CXXFLAGS := -fprofile-generate=$(PGO_DIR)
 PGO_GENERATE_LDFLAGS := -fprofile-generate=$(PGO_DIR)
