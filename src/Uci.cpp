@@ -939,11 +939,11 @@ struct UciSession {
     }
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess\U0001F984 0.3.73 by the Magnus developer & This is a beta version" << std::endl;
+        out << "MagnusChess\U0001F984 0.3.75 by the Magnus developer & This is a beta version" << std::endl;
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess 0.3.73 for Beta Testing\n";
+        out << "id name MagnusChess 0.3.75 for Beta Testing\n";
         out << "id author Magnus\U0001F984(gitvalerain@gmail.com)\n";
         out << "option name Hash type spin default 16 min 1 max 1048576\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";

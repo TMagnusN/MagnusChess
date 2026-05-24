@@ -25,7 +25,6 @@ SOFTWARE.
 #pragma once
 
 #include <atomic>
-#include <cstddef>
 #include <iosfwd>
 #include <string>
 

@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2026 MagnusU0001F984
+Copyright (c) 2026 Magnus🦄
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -40,7 +40,8 @@ namespace magnus {
 /*
 This file owns the static lookup tables that are expensive to rebuild during
 search: leaper attacks, geometry masks, distance tables, and Zobrist keys.
-Everything is initialized once and then shared through memory::Memory.
+Geometry / leaper tables are built at compile time via consteval factories;
+only Zobrist keys still need runtime PRNG setup.
 */
 
 struct ZobristTables {
@@ -49,29 +50,6 @@ struct ZobristTables {
     Key castling[16]{};
     Key ep_file[8]{};
     Key side = 0;
-};
-
-/*
- * Tables — 靜態查表集合（一次性初始化，搜尋期間唯讀）
- * 包含：國王/騎士/兵攻擊遮罩、between/line 幾何遮罩、
- * Chebyshev/Manhattan 距離表、Zobrist 雜湊鍵表
- * 輔助函數：splitmix64(PRNG)、mix64(最終化)、king_attack_mask、knight_attack_mask
- * 所有表在程式啟動時通過 tables_init() 一次性構建
- */
-struct Tables {
-    // Leaper attack masks and board geometry helpers.
-    Bitboard king_attacks[SQ_NB]{};
-    Bitboard knight_attacks[SQ_NB]{};
-    Bitboard pawn_attacks[COLOR_NB][SQ_NB]{};
-
-    Bitboard between[SQ_NB][SQ_NB]{};  // Squares strictly between two aligned squares.
-    Bitboard line[SQ_NB][SQ_NB]{};     // Full rank/file/diagonal through two aligned squares.
-
-    u8 chebyshev[SQ_NB][SQ_NB]{};
-    u8 manhattan[SQ_NB][SQ_NB]{};
-
-    ZobristTables zobrist{};
-    bool initialized = false;
 };
 
 // Small constexpr math helpers used while building geometry tables.
@@ -219,26 +197,96 @@ constexpr Bitboard compute_between(Square a, Square b) noexcept {
     return mask;
 }
 
-inline void tables_init_leapers(Tables& t) noexcept {
-    for (int sq = 0; sq < SQ_NB; ++sq) {
-        t.king_attacks[sq] = king_attack_mask(sq);
-        t.knight_attacks[sq] = knight_attack_mask(sq);
-        t.pawn_attacks[WHITE][sq] = pawn_attack_mask(WHITE, sq);
-        t.pawn_attacks[BLACK][sq] = pawn_attack_mask(BLACK, sq);
-    }
+/*
+ * Consteval factories — every geometry/lookup table is precomputed here so
+ * Tables can be populated with zero runtime overhead. Each function is called
+ * exactly once as a default member initializer of Tables; the resulting
+ * std::array data lives directly in .rodata.
+ *
+ * These MUST appear before the Tables struct definition because they are
+ * used in its default member initializers.
+ */
+consteval std::array<Bitboard, SQ_NB> make_king_attacks() noexcept {
+    std::array<Bitboard, SQ_NB> arr{};
+    for (int sq = 0; sq < SQ_NB; ++sq)
+        arr[sq] = king_attack_mask(static_cast<Square>(sq));
+    return arr;
 }
 
-inline void tables_init_geometry(Tables& t) noexcept {
-    for (int a = 0; a < SQ_NB; ++a) {
-        for (int b = 0; b < SQ_NB; ++b) {
-            t.between[a][b] = compute_between(a, b);
-            t.line[a][b] = compute_line(a, b);
-            t.chebyshev[a][b] = static_cast<u8>(chebyshev_distance(a, b));
-            t.manhattan[a][b] = static_cast<u8>(manhattan_distance(a, b));
-        }
-    }
+consteval std::array<Bitboard, SQ_NB> make_knight_attacks() noexcept {
+    std::array<Bitboard, SQ_NB> arr{};
+    for (int sq = 0; sq < SQ_NB; ++sq)
+        arr[sq] = knight_attack_mask(static_cast<Square>(sq));
+    return arr;
 }
 
+consteval std::array<std::array<Bitboard, SQ_NB>, COLOR_NB> make_pawn_attacks() noexcept {
+    std::array<std::array<Bitboard, SQ_NB>, COLOR_NB> arr{};
+    for (int c = 0; c < COLOR_NB; ++c)
+        for (int sq = 0; sq < SQ_NB; ++sq)
+            arr[c][sq] = pawn_attack_mask(static_cast<Color>(c), static_cast<Square>(sq));
+    return arr;
+}
+
+consteval std::array<std::array<Bitboard, SQ_NB>, SQ_NB> make_between() noexcept {
+    std::array<std::array<Bitboard, SQ_NB>, SQ_NB> arr{};
+    for (int a = 0; a < SQ_NB; ++a)
+        for (int b = 0; b < SQ_NB; ++b)
+            arr[a][b] = compute_between(static_cast<Square>(a), static_cast<Square>(b));
+    return arr;
+}
+
+consteval std::array<std::array<Bitboard, SQ_NB>, SQ_NB> make_line() noexcept {
+    std::array<std::array<Bitboard, SQ_NB>, SQ_NB> arr{};
+    for (int a = 0; a < SQ_NB; ++a)
+        for (int b = 0; b < SQ_NB; ++b)
+            arr[a][b] = compute_line(static_cast<Square>(a), static_cast<Square>(b));
+    return arr;
+}
+
+consteval std::array<std::array<u8, SQ_NB>, SQ_NB> make_chebyshev() noexcept {
+    std::array<std::array<u8, SQ_NB>, SQ_NB> arr{};
+    for (int a = 0; a < SQ_NB; ++a)
+        for (int b = 0; b < SQ_NB; ++b)
+            arr[a][b] = static_cast<u8>(chebyshev_distance(static_cast<Square>(a), static_cast<Square>(b)));
+    return arr;
+}
+
+consteval std::array<std::array<u8, SQ_NB>, SQ_NB> make_manhattan() noexcept {
+    std::array<std::array<u8, SQ_NB>, SQ_NB> arr{};
+    for (int a = 0; a < SQ_NB; ++a)
+        for (int b = 0; b < SQ_NB; ++b)
+            arr[a][b] = static_cast<u8>(manhattan_distance(static_cast<Square>(a), static_cast<Square>(b)));
+    return arr;
+}
+
+/*
+ * Tables — 靜態查表集合（編譯期初始化，搜尋期間唯讀）
+ * 包含：國王/騎士/兵攻擊遮罩、between/line 幾何遮罩、
+ * Chebyshev/Manhattan 距離表、Zobrist 雜湊鍵表
+ * 幾何/跳子表在編譯期通過 consteval 工廠函數一次性構建
+ */
+struct Tables {
+    // Leaper attack masks and board geometry helpers.
+    // All geometry/lookup tables are built at compile time via consteval
+    // factory functions so there is zero runtime setup overhead here.
+    std::array<Bitboard, SQ_NB> king_attacks   = make_king_attacks();
+    std::array<Bitboard, SQ_NB> knight_attacks  = make_knight_attacks();
+    std::array<std::array<Bitboard, SQ_NB>, COLOR_NB> pawn_attacks = make_pawn_attacks();
+
+    std::array<std::array<Bitboard, SQ_NB>, SQ_NB> between  = make_between();  // Squares strictly between two aligned squares.
+    std::array<std::array<Bitboard, SQ_NB>, SQ_NB> line     = make_line();     // Full rank/file/diagonal through two aligned squares.
+
+    std::array<std::array<u8, SQ_NB>, SQ_NB> chebyshev  = make_chebyshev();
+    std::array<std::array<u8, SQ_NB>, SQ_NB> manhattan  = make_manhattan();
+
+    ZobristTables zobrist{};
+    bool initialized = false;
+};
+
+// Zobrist keys are still initialized at runtime because they depend on a
+// runtime-supplied seed (needed for TT collision diversity). If the seed is
+// changed to a constexpr default, the PRNG chain below can be consteval too.
 inline void tables_init_zobrist(ZobristTables& z, u64 seed = 0xC0FFEE1234567890ULL) noexcept {
     u64 x = seed;
 
@@ -256,13 +304,13 @@ inline void tables_init_zobrist(ZobristTables& z, u64 seed = 0xC0FFEE1234567890U
     z.side = splitmix64(x);
 }
 
+// Geometry tables are now consteval-populated (see make_* factories above),
+// so only Zobrist still needs a runtime initialization step.
 inline void tables_init(Tables& t, u64 zobrist_seed = 0xC0FFEE1234567890ULL) noexcept {
-    // Initialize every shared table in a single place so callers only need one
-    // setup entry point.
-    tables_init_leapers(t);
-    tables_init_geometry(t);
-    tables_init_zobrist(t.zobrist, zobrist_seed);
-    t.initialized = true;
+    if (!t.initialized) {
+        tables_init_zobrist(t.zobrist, zobrist_seed);
+        t.initialized = true;
+    }
 }
 
 } // namespace magnus
