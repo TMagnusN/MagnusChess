@@ -79,6 +79,12 @@ struct Position {
     mutable u32 nnue_generation = 0;
     mutable bool nnue_acc_valid = false;
     alignas(64) mutable std::array<std::array<i16, nnue::kHiddenSize>, COLOR_NB> nnue_acc{};
+
+    // MNUE-P2 persistent accumulator. Separate from legacy Chess768 NNUE
+    // because P2 uses hidden size 1024 and a different feature layout.
+    mutable u32 mnue_p2_generation = 0;
+    mutable bool mnue_p2_acc_valid = false;
+    alignas(64) mutable std::array<std::array<i16, 1024>, COLOR_NB> mnue_p2_acc{};
 };
 
 struct StateInfo {

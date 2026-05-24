@@ -26,6 +26,7 @@ SOFTWARE.
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <charconv>
 #include <filesystem>
@@ -43,9 +44,14 @@ SOFTWARE.
 #include "Common.h"
 #include "Evaluation.h"
 #include "Memory.h"
+#include "Mnue.h"
 #include "Nnue.h"
 #include "Search.h"
 #include "Time.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 /*
  * MagnusChess UCI 前端 — Universal Chess Interface 實作
@@ -83,6 +89,57 @@ constexpr int MAX_UCI_THREADS = 512;
 constexpr int DEFAULT_UCI_CONTEMPT = 0;
 constexpr int MIN_UCI_CONTEMPT = -10000;
 constexpr int MAX_UCI_CONTEMPT = 10000;
+
+static std::string default_mnue_p2_file() {
+    return "6df83890b.MNUE";
+}
+
+[[nodiscard]] const std::string& get_executable_dir() {
+    static const std::string dir = []() -> std::string {
+#ifdef _WIN32
+        char buf[MAX_PATH];
+        const DWORD len = GetModuleFileNameA(nullptr, buf, sizeof(buf));
+        if (len > 0 && len < sizeof(buf))
+            return std::filesystem::path(buf).parent_path().string();
+#endif
+        return std::filesystem::current_path().string();
+    }();
+    return dir;
+}
+
+[[nodiscard]] std::string resolve_file_path(const std::string& filename) {
+    std::error_code ec;
+
+    // 1. Absolute path or CWD-relative — if it already exists, use as-is.
+    if (std::filesystem::exists(filename, ec) && !ec)
+        return filename;
+
+    // 2. Relative to executable directory.
+    const std::string& exe_dir = get_executable_dir();
+    for (const char* subdir : {"", "/bin/", "/../", "/../../", "/../bin/", "/../../bin/"}) {
+        const std::string candidate = exe_dir + subdir + filename;
+        if (std::filesystem::exists(candidate, ec) && !ec)
+            return candidate;
+    }
+
+    // 3. Give up — fall back to the original filename so the error message
+    //    still shows what was requested.
+    return filename;
+}
+
+[[nodiscard]] bool has_mnue_extension(const std::string& path) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    std::transform(
+        ext.begin(),
+        ext.end(),
+        ext.begin(),
+        [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        }
+    );
+    return ext == ".mnue";
+}
+
 struct PositionHistory {
     Key keys[search::MAX_GAME_HISTORY]{};
     int count = 0;
@@ -372,10 +429,16 @@ void display_position(const Position& pos, std::ostream& out) {
     out << "Fen: " << display_fen(pos) << '\n';
 }
 
+enum class DisplayScoreModel {
+    Hce,
+    Nnue,
+    Mnue
+};
+
 [[nodiscard]] std::string display_score_text(
     const Position& root,
     int score,
-    bool nnue_score
+    DisplayScoreModel score_model
 ) {
     constexpr int DISPLAY_VALUE_MATE = 31000;
 
@@ -389,7 +452,11 @@ void display_position(const Position& pos, std::ostream& out) {
         return "mate -" + std::to_string((plies_to_mate + 1) / 2);
     }
 
-    const int cp = nnue_score ? nnue::search_score_to_cp(score, root) : score;
+    int cp = score;
+    if (score_model == DisplayScoreModel::Mnue)
+        cp = mnue::search_score_to_cp(score, root);
+    else if (score_model == DisplayScoreModel::Nnue)
+        cp = nnue::search_score_to_cp(score, root);
     return "cp " + std::to_string(cp);
 }
 
@@ -601,8 +668,15 @@ void display_position(const Position& pos, std::ostream& out) {
 
 
 [[nodiscard]] const char* active_eval_name(bool use_nnue) noexcept {
-    return use_nnue && nnue::loaded() ? "nnue" : "hce";
+    if (!use_nnue)
+        return "hce";
+    if (mnue::p2_loaded())
+        return "mnue-p2";
+    if (nnue::loaded())
+        return "nnue";
+    return "hce";
 }
+
 
 [[nodiscard]] inline int white_pov_score(const Position& pos, int stm_score) noexcept {
     return pos.side_to_move == WHITE ? stm_score : -stm_score;
@@ -790,6 +864,7 @@ struct UciSession {
     int threads = DEFAULT_UCI_THREADS;
     int contempt = DEFAULT_UCI_CONTEMPT;
     std::string eval_file = default_eval_file();
+    std::string eval_file_p2 = default_mnue_p2_file();
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> search_running{false};
     std::atomic<bool> ponder_search{false};
@@ -798,19 +873,22 @@ struct UciSession {
     std::atomic<int> ponder_time_offset_ms{0};
     std::atomic<long long> search_start_ms{0};
     std::thread search_thread;
-    std::thread nnue_preload_thread;
 
     UciSession() {
         memory::memory_init(mem, 64, 8, 2);
         // attack_init_backend deferred to first command that needs it.
         set_start_position(pos);
         position_refresh_key(pos, mem.tables);
-        // Start NNUE preload in background so the file is ready by the first search.
-        if (use_nnue && !eval_file.empty()) {
-            nnue_preload_thread = std::thread([path = eval_file]() {
-                nnue::load(path);
-            });
-        }
+        if (use_nnue)
+            (void)ensure_eval_loaded(nullptr);
+    }
+
+    [[nodiscard]] bool mnue_active() const noexcept {
+        return use_nnue && mnue::p2_loaded();
+    }
+
+    [[nodiscard]] std::string mnue_name() const {
+        return mnue::p2_loaded() ? mnue::p2_path() : std::string{};
     }
 
     void ensure_attack_ready() {
@@ -819,8 +897,6 @@ struct UciSession {
 
     ~UciSession() {
         stop_search();
-        if (nnue_preload_thread.joinable())
-            nnue_preload_thread.join();
         memory::memory_free(mem);
     }
 
@@ -877,7 +953,7 @@ struct UciSession {
         out << "option name Clear Hash type button\n";
         out << "option name UseNNUE type check default true\n";
         out << "option name Ponder type check default true\n";
-        out << "option name EvalFile type string default " << eval_file << '\n';
+        out << "option name MNUEfile type string default " << eval_file_p2 << '\n';
         out << "uciok" << std::endl;
     }
 
@@ -906,22 +982,59 @@ struct UciSession {
     }
 
     [[nodiscard]] bool ensure_nnue_loaded(std::ostream* out) {
-        // Wait for any background preload to finish before touching NNUE state.
-        if (nnue_preload_thread.joinable())
-            nnue_preload_thread.join();
+        if (has_mnue_extension(eval_file)) {
+            if (out)
+                *out << "info string NNUE loader got .mnue path; use MNUEfile option\n";
+            return false;
+        }
 
-        if (nnue::loaded() && nnue::path() == eval_file)
+        const std::string resolved = resolve_file_path(eval_file);
+
+        if (nnue::loaded() && nnue::path() == resolved)
             return true;
 
-        if (nnue::load(eval_file)) {
+        if (nnue::load(resolved)) {
             if (out)
-                *out << "info string loaded nnue " << eval_file << '\n';
+                *out << "info string loaded nnue " << resolved << '\n';
             return true;
         }
 
         if (out)
             *out << "info string failed to load nnue: " << nnue::last_error() << '\n';
         return false;
+    }
+
+
+    [[nodiscard]] bool ensure_mnue_loaded(std::ostream* out) {
+        if (eval_file_p2.empty())
+            return false;
+
+        const std::string p2_resolved = resolve_file_path(eval_file_p2);
+
+        if (mnue::p2_loaded() && mnue::p2_path() == p2_resolved)
+            return true;
+
+        if (!mnue::load_p2(p2_resolved)) {
+            if (out)
+                *out << "info string failed to load mnue p2: "
+                     << mnue::last_error() << '\n';
+            return false;
+        }
+
+        if (out)
+            *out << "info string loaded mnue p2 " << p2_resolved << '\n';
+
+        return true;
+    }
+
+    [[nodiscard]] bool ensure_eval_loaded(std::ostream* out) {
+        if (!use_nnue)
+            return false;
+
+        if (ensure_mnue_loaded(out))
+            return true;
+
+        return ensure_nnue_loaded(out);
     }
 
     void handle_setoption(std::ostream& out, std::string_view command) {
@@ -980,8 +1093,8 @@ struct UciSession {
                     memory::memory_clear_hash(mem);
 
                 use_nnue = parsed;
-                if (use_nnue && !ensure_nnue_loaded(&out))
-                    out << "info string nnue unavailable, search will fall back to hce\n";
+                if (use_nnue && !ensure_eval_loaded(&out))
+                    out << "info string eval unavailable, search will fall back to hce\n";
             }
         }
         else if (name == "Ponder") {
@@ -989,18 +1102,18 @@ struct UciSession {
             if (parse_bool(value, parsed))
                 enable_ponder = parsed;
         }
-        else if (name == "EvalFile") {
+        else if (name == "MNUEfile") {
             if (!value.empty()) {
                 std::error_code ec;
                 if (!std::filesystem::exists(value, ec) || ec) {
-                    out << "info string EvalFile not found: " << value << '\n';
+                    out << "info string MNUEfile not found: " << value << '\n';
                     return;
                 }
-                eval_file = value;
+                eval_file_p2 = value;
                 memory::memory_clear_hash(mem);
 
-                if (use_nnue && !ensure_nnue_loaded(&out))
-                    out << "info string nnue unavailable, search will fall back to hce\n";
+                if (use_nnue && !ensure_eval_loaded(&out))
+                    out << "info string eval unavailable, search will fall back to hce\n";
             }
         }
     }
@@ -1009,20 +1122,41 @@ struct UciSession {
         std::ostream& out,
         const char* fallback_message
     ) {
-        if (use_nnue &&
-            !nnue::loaded() &&
-            !ensure_nnue_loaded(&out)) {
+        if (use_nnue && !ensure_eval_loaded(&out))
             out << fallback_message << '\n';
-        }
     }
 
+
     void handle_eval(std::ostream& out) {
-        if (use_nnue && !nnue::loaded())
-            (void)ensure_nnue_loaded(nullptr);
+        if (use_nnue && !ensure_eval_loaded(&out))
+            out << "info string eval unavailable, using hce\n";
 
         out << "info string eval " << active_eval_name(use_nnue) << '\n';
         const int hce_stm = eval::evaluate(pos);
         out << "info string hce cp " << white_pov_score(pos, hce_stm) << '\n';
+
+
+        if (mnue::p2_loaded()) {
+            const int raw_stm = mnue::eval_p2(pos);
+            const int search_stm = mnue::search_score(raw_stm, pos);
+            const int search_cp_stm = mnue::search_score_to_cp(search_stm, pos);
+            const int winrate_stm = mnue::win_rate_model(raw_stm, pos);
+            const mnue::WdlTriplet wdl_white =
+                white_pov_wdl(pos, mnue::search_score_to_wdl(search_stm, pos));
+
+            out << "info string mnue p2 path " << mnue::p2_path() << '\n';
+            out << "info string mnue p2 material " << mnue::material_units(pos) << '\n';
+            out << "info string mnue p2 raw " << white_pov_score(pos, raw_stm) << '\n';
+            out << "info string mnue p2 search " << white_pov_score(pos, search_stm) << '\n';
+            out << "info string mnue p2 searchcp " << white_pov_score(pos, search_cp_stm) << '\n';
+            out << "info string mnue p2 winrate "
+                << white_pov_winrate(pos, winrate_stm) << '\n';
+            out << "info string mnue p2 wdl "
+                << wdl_white.win << ' '
+                << wdl_white.draw << ' '
+                << wdl_white.loss << '\n';
+
+        }
 
         if (nnue::loaded()) {
             const int raw_stm = nnue::eval(pos);
@@ -1110,7 +1244,10 @@ struct UciSession {
         }
 
         ensure_search_eval_ready(out, "info string nnue unavailable, sort will use hce");
-        const bool using_nnue_scores = use_nnue && nnue::loaded();
+        const DisplayScoreModel score_model =
+            use_nnue && mnue::p2_loaded()
+                ? DisplayScoreModel::Mnue
+                : (use_nnue && nnue::loaded() ? DisplayScoreModel::Nnue : DisplayScoreModel::Hce);
 
         struct SortEntry {
             Move move = 0;
@@ -1184,7 +1321,7 @@ struct UciSession {
                 pv = move_text;
 
             const std::string score_text =
-                display_score_text(pos, result.score, using_nnue_scores);
+                display_score_text(pos, result.score, score_model);
 
             entries.push_back({
                 move,
@@ -1339,6 +1476,10 @@ struct UciSession {
 
         ensure_search_eval_ready(out, "info string nnue unavailable, search will use hce");
 
+        if (mnue_active()){
+            std :: cout << "info string MNUE evaluation using " << mnue_name() << "(20.1 MB, (1,32,16,1024,10240))\n";
+        }
+
         limits.use_nnue = use_nnue;
         limits.contempt = contempt;
         limits.stop = &stop_requested;
@@ -1427,6 +1568,8 @@ struct UciSession {
         }
 
         if (line == "isready") {
+            if (use_nnue && !ensure_eval_loaded(&out))
+                out << "info string eval unavailable, search will use hce\n";
             out << "readyok\n";
             return true;
         }
@@ -1462,6 +1605,23 @@ struct UciSession {
             return true;
         }
 
+        if (command_starts_with(line, "mnueloadp2")) {
+            const std::string path{arrow_arguments(command_arguments(line, "mnueloadp2"))};
+            if (path.empty()) {
+                out << "info string usage: mnueloadp2 <path-to-p2.mnue>\n";
+                return true;
+            }
+
+            if (mnue::load_p2(path)) {
+                memory::memory_clear_hash(mem);
+                out << "info string loaded mnue p2 " << path << '\n';
+            } else {
+                out << "info string failed to load mnue p2: " << mnue::last_error() << '\n';
+            }
+            return true;
+        }
+
+
         if (line == "eval") {
             handle_eval(out);
             return true;
@@ -1469,6 +1629,20 @@ struct UciSession {
 
         if (line == "d") {
             display_position(pos, out);
+            return true;
+        }
+
+        if (line == "mnuedebug") {
+            if (use_nnue)
+                (void)ensure_eval_loaded(&out);
+            mnue::debug_dump_p2_features(pos, out);
+            return true;
+        }
+
+        if (line == "mnuecheck") {
+            if (use_nnue)
+                (void)ensure_eval_loaded(&out);
+            (void)mnue::debug_check_p2_incremental(pos, out);
             return true;
         }
 

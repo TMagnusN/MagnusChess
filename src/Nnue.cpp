@@ -263,10 +263,10 @@ inline void apply_feature_delta_avx2(
 ) noexcept {
     i16* acc_ptr = acc.data();
     for (int i = 0; i < kHidden; i += 16) {
-        __m256i acc_vec;
-        std::memcpy(&acc_vec, acc_ptr + i, sizeof(__m256i));
-        __m256i weight_vec;
-        std::memcpy(&weight_vec, weights + i, sizeof(__m256i));
+        __m256i acc_vec = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(acc_ptr + i));
+        __m256i weight_vec = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(weights + i));
 
         if (add) {
             acc_vec = _mm256_add_epi16(acc_vec, weight_vec);
@@ -274,7 +274,8 @@ inline void apply_feature_delta_avx2(
             acc_vec = _mm256_sub_epi16(acc_vec, weight_vec);
         }
 
-        std::memcpy(acc_ptr + i, &acc_vec, sizeof(__m256i));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(acc_ptr + i), acc_vec);
     }
 }
 
@@ -285,16 +286,17 @@ inline void apply_feature_move_delta_avx2(
 ) noexcept {
     i16* acc_ptr = acc.data();
     for (int i = 0; i < kHidden; i += 16) {
-        __m256i acc_vec;
-        std::memcpy(&acc_vec, acc_ptr + i, sizeof(__m256i));
-        __m256i add_vec;
-        std::memcpy(&add_vec, add_weights + i, sizeof(__m256i));
-        __m256i sub_vec;
-        std::memcpy(&sub_vec, sub_weights + i, sizeof(__m256i));
+        __m256i acc_vec = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(acc_ptr + i));
+        __m256i add_vec = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(add_weights + i));
+        __m256i sub_vec = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(sub_weights + i));
 
         acc_vec = _mm256_add_epi16(acc_vec, _mm256_sub_epi16(add_vec, sub_vec));
 
-        std::memcpy(acc_ptr + i, &acc_vec, sizeof(__m256i));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(acc_ptr + i), acc_vec);
     }
 }
 

@@ -73,7 +73,7 @@ int history_bonus(int depth) noexcept {
 }
 
 int history_penalty(int depth) noexcept {
-    return history_bonus(depth) * 3;
+    return history_bonus(depth) * 4;
 }
 
 int see_immediate_term(int see_value, SeeScalePreset preset) noexcept {

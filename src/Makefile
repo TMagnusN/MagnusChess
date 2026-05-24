@@ -26,7 +26,8 @@ SRC := \
 	See.cpp \
 	Time.cpp \
 	TT.cpp \
-	Uci.cpp
+	Uci.cpp \
+	Mnue.cpp
 
 OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(SRC))
 DEP := $(OBJ:.o=.d)

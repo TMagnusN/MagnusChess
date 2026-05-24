@@ -47,6 +47,14 @@ SOFTWARE.
  */
 namespace magnus::search {
 
+#ifndef MAGNUS_ENABLE_PV_LMR
+#define MAGNUS_ENABLE_PV_LMR 1
+#endif
+
+#ifndef MAGNUS_ENABLE_CAPTURE_LMR
+#define MAGNUS_ENABLE_CAPTURE_LMR 1
+#endif
+
 namespace {
 
 // FP_ONE_PLY = 1024：固定點精度，1 個 ply = 1024 單位
@@ -108,6 +116,7 @@ constexpr int LMR_SHALLOWER_RESEARCH_MARGIN = 8;
         move.capture_history_score
             + move.see_bias_term * 16
             + std::clamp(move.see_value, -512, 512)
+            - (move.bad_capture ? 256 : 0)
             + (move.gives_check ? 96 : 0),
         -8192,
         8192
@@ -143,18 +152,44 @@ constexpr int LMR_SHALLOWER_RESEARCH_MARGIN = 8;
 LmrDecision decide_lmr(const LmrNodeContext& node, const LmrMoveContext& move) noexcept {
     LmrDecision decision{};
 
-    const bool quiet_candidate =
+    if (node.exclusion_search ||
+        node.mate_window ||
+        node.checked ||
+        node.move_extension != 0 ||
+        move.is_tt_move ||
+        move.gives_check ||
+        move.recapture ||
+        move.promotion) {
+        return decision;
+    }
+
+    const bool non_pv_quiet_candidate =
         move.quiet &&
         !node.pv_node &&
-        !node.checked &&
         node.depth >= 3 &&
         move.move_index >= 2;
+
+#if MAGNUS_ENABLE_PV_LMR
+    const bool pv_quiet_candidate =
+        move.quiet &&
+        node.pv_node &&
+        node.depth >= 5 &&
+        move.move_index >= 4;
+#else
+    constexpr bool pv_quiet_candidate = false;
+#endif
+
+    const bool quiet_candidate = non_pv_quiet_candidate || pv_quiet_candidate;
+
+#if MAGNUS_ENABLE_CAPTURE_LMR
     const bool capture_candidate =
         move.simple_capture &&
         !node.pv_node &&
-        !node.checked &&
         node.depth >= 4 &&
         move.reduction_index >= 2;
+#else
+    constexpr bool capture_candidate = false;
+#endif
 
     if (!quiet_candidate && !capture_candidate)
         return decision;
@@ -170,9 +205,10 @@ LmrDecision decide_lmr(const LmrNodeContext& node, const LmrMoveContext& move) n
 
     // SEE-guided capture reduction: winning captures should barely be reduced.
     if (capture_candidate) {
-        if (move.see_value >= 200)           fp -= FP_ONE_PLY / 2;
-        else if (move.see_value >= 100)      fp -= FP_ONE_PLY / 4;
-        else if (move.see_value < -50)       fp += FP_ONE_PLY / 4;
+        if (move.see_value >= 200)           fp -= FP_ONE_PLY;
+        else if (move.see_value >= 0)        fp -= FP_ONE_PLY / 2;
+        else if (move.bad_capture)           fp += FP_ONE_PLY / 2;
+        else                                 fp += FP_ONE_PLY / 4;
         fp = std::max(0, fp);
     }
 
@@ -182,6 +218,9 @@ LmrDecision decide_lmr(const LmrNodeContext& node, const LmrMoveContext& move) n
         fp -= FP_ONE_PLY / 8;
     else
         fp += FP_ONE_PLY / 4;
+
+    if (node.pv_node)
+        fp -= FP_ONE_PLY / 2;
 
     if (!node.tt_move_present)
         fp += FP_ONE_PLY / 2;
@@ -222,9 +261,18 @@ LmrDecision decide_lmr(const LmrNodeContext& node, const LmrMoveContext& move) n
     fp -= history_bonus_fp(move, decision.stat_score);
 
     const int min_reduction = 0;
-    const int max_reduction = move.quiet
-        ? std::min(node.depth - 1, 5)
-        : std::min(node.depth - 1, 3);
+    int max_reduction = 0;
+    if (pv_quiet_candidate) {
+        max_reduction = 1;
+    } else if (move.quiet) {
+        max_reduction = std::min(node.depth - 1, 5);
+    } else if (move.see_value >= 200) {
+        max_reduction = 1;
+    } else if (move.see_value >= 0) {
+        max_reduction = std::min(node.depth - 1, 2);
+    } else {
+        max_reduction = std::min(node.depth - 1, 3);
+    }
 
     decision.final_reduction_fp = std::clamp(
         fp,

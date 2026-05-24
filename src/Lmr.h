@@ -62,8 +62,12 @@ struct LmrNodeContext {
     bool all_node = false;          // 是否為 all-node（預期無截斷）
     bool checked = false;           // 走子方是否被將軍
     bool improving = false;         // 靜態評估是否在改善中
+    bool exclusion_search = false;  // 是否為 singular/exclusion 驗證搜索
+    bool mate_window = false;       // 是否接近 mate score window
     bool tt_move_present = false;   // TT 中是否有著法（影響減免量）
     bool tt_move_is_capture = false;// TT 著法是否為捕獲
+    int static_eval = 0;            // 當前節點靜態評估
+    int move_extension = 0;         // 該著法的延伸/負延伸量
     int next_ply_cutoff_count = 0;  // 下一層的截斷次數（用於調整減免）
     int parent_reduction_fp = 0;    // 父節點的減免量（固定點格式，用於連續減免）
     int tt_depth = 0;               // TT 條目深度（用於 LMR 信心加權）
@@ -84,6 +88,7 @@ struct LmrMoveContext {
     bool quiet = false;             // 是否為安靜著法（非捕獲、非升變）
     bool capture = false;           // 是否為捕獲著法（含升變捕獲）
     bool simple_capture = false;    // 是否為簡單捕獲（捕獲但非升變）
+    bool bad_capture = false;       // MovePicker/SEE 判定的壞捕獲
     bool gives_check = false;       // 是否將軍
     bool recapture = false;         // 是否為反吃（目標格與前一步相同）
     bool promotion = false;         // 是否為升變

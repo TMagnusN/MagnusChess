@@ -42,6 +42,7 @@ SOFTWARE.
 #include "MoveGen.h"
 #include "Nmp.h"
 #include "Nnue.h"
+#include "Mnue.h"
 #include "See.h"
 
 /*
@@ -151,6 +152,10 @@ constexpr int CORRECTION_WEIGHT_SUM =
 #define MAGNUS_SEARCHSTATS_OBS 0
 #endif
 
+#ifndef MAGNUS_LMR_OBS
+#define MAGNUS_LMR_OBS 0
+#endif
+
 #ifndef MAGNUS_ENABLE_PROBCUT
 #define MAGNUS_ENABLE_PROBCUT 1
 #endif
@@ -195,6 +200,12 @@ constexpr SeeScalePreset SEE_TERM_PRESET = SeeScalePreset::Strong;
 #define MAGNUS_MOVEPICKER_OBS 0
 #endif
 
+enum class ScoreModel {
+    Hce,
+    Nnue,
+    Mnue
+};
+
 [[nodiscard]] static inline int mvv_lva_capture_term(
     const Position& pos,
     Move move
@@ -210,7 +221,7 @@ inline void append_uci_score(
     std::ostream& out,
     int score,
     const Position& root,
-    bool nnue_winrate_score
+    ScoreModel score_model
 ) {
     if (score >= VALUE_MATE - MAX_PLY) {
         const int plies_to_mate = VALUE_MATE - score;
@@ -224,12 +235,17 @@ inline void append_uci_score(
         return;
     }
 
-    const int display_score = nnue_winrate_score
-        ? nnue::search_score_to_cp(score, root)
-        : score;
+    int display_score = score;
+    if (score_model == ScoreModel::Mnue)
+        display_score = mnue::search_score_to_cp(score, root);
+    else if (score_model == ScoreModel::Nnue)
+        display_score = nnue::search_score_to_cp(score, root);
     out << "score cp " << display_score;
 
-    if (nnue_winrate_score) {
+    if (score_model == ScoreModel::Mnue) {
+        const mnue::WdlTriplet wdl = mnue::search_score_to_wdl(score, root);
+        out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
+    } else if (score_model == ScoreModel::Nnue) {
         const nnue::WdlTriplet wdl = nnue::search_score_to_wdl(score, root);
         out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
     }
@@ -301,6 +317,24 @@ struct Searcher {
     int nmp_min_ply = 0;
 #if MAGNUS_SEARCHSTATS_OBS
     SearchStats stats{};
+#endif
+
+#if MAGNUS_LMR_OBS
+    struct LmrObservation {
+        u64 considered = 0;
+        u64 eligible = 0;
+        u64 reduced = 0;
+        u64 fail_high = 0;
+        u64 researches = 0;
+        u64 full_confirms = 0;
+        u64 quiet = 0;
+        u64 capture = 0;
+        u64 pv = 0;
+        u64 non_pv = 0;
+        u64 r1 = 0;
+        u64 r2 = 0;
+        u64 r3_plus = 0;
+    } lmr_obs{};
 #endif
 
 #if MAGNUS_CAPTURE_OBS
@@ -928,6 +962,67 @@ struct Searcher {
         return control;
     }
 
+#if MAGNUS_LMR_OBS
+    inline void record_lmr_considered(
+        const LmrDecision& lmr,
+        bool quiet,
+        bool capture,
+        bool pv_node
+    ) noexcept {
+        ++lmr_obs.considered;
+        if (lmr.eligible)
+            ++lmr_obs.eligible;
+        if (quiet)
+            ++lmr_obs.quiet;
+        if (capture)
+            ++lmr_obs.capture;
+        if (pv_node)
+            ++lmr_obs.pv;
+        else
+            ++lmr_obs.non_pv;
+
+        if (!lmr.eligible)
+            return;
+
+        ++lmr_obs.reduced;
+        if (lmr.final_reduction <= 1)
+            ++lmr_obs.r1;
+        else if (lmr.final_reduction == 2)
+            ++lmr_obs.r2;
+        else
+            ++lmr_obs.r3_plus;
+    }
+
+    inline void record_lmr_fail_high() noexcept {
+        ++lmr_obs.fail_high;
+    }
+
+    inline void record_lmr_research() noexcept {
+        ++lmr_obs.researches;
+    }
+
+    inline void record_lmr_full_confirm() noexcept {
+        ++lmr_obs.full_confirms;
+    }
+
+    inline void emit_lmr_observation(std::ostream& out) const {
+        out << "info string lmrobs considered " << lmr_obs.considered
+            << " eligible " << lmr_obs.eligible
+            << " reduced " << lmr_obs.reduced
+            << " fail_high " << lmr_obs.fail_high
+            << " researches " << lmr_obs.researches
+            << " full_confirms " << lmr_obs.full_confirms
+            << " quiet " << lmr_obs.quiet
+            << " capture " << lmr_obs.capture
+            << " pv " << lmr_obs.pv
+            << " nonpv " << lmr_obs.non_pv
+            << " r1 " << lmr_obs.r1
+            << " r2 " << lmr_obs.r2
+            << " r3plus " << lmr_obs.r3_plus
+            << '\n';
+    }
+#endif
+
     [[nodiscard]] inline u64 global_nodes() const noexcept {
         if (limits.shared_nodes != nullptr) {
             return limits.shared_nodes->load(std::memory_order_relaxed)
@@ -1057,7 +1152,13 @@ struct Searcher {
         return limits.use_nnue && nnue::loaded();
     }
 
+    [[nodiscard]] inline bool use_mnue() const noexcept {
+        return limits.use_nnue && mnue::p2_loaded();
+    }
+
     [[nodiscard]] inline int evaluate_raw_position(const Position& pos) const noexcept {
+        if (use_mnue())
+            return mnue::eval_p2(pos);
         if (use_nnue())
             return nnue::eval(pos);
         return eval::evaluate(pos);
@@ -1067,6 +1168,8 @@ struct Searcher {
         int raw_eval,
         const Position& pos
     ) const noexcept {
+        if (use_mnue())
+            return mnue::search_score(raw_eval, pos);
         if (use_nnue())
             return nnue::search_score(raw_eval, pos);
         return raw_eval;
@@ -2071,7 +2174,7 @@ struct Searcher {
             const int move_index = moves_tried - 1;
             ++legal_count;
             const bool capture_move = move_is_capture(move);
-            [[maybe_unused]] const bool bad_capture = picker.last_was_bad_capture();
+            const bool bad_capture = picker.last_was_bad_capture();
             const bool quiet_move =
                 !capture_move &&
                 !move_is_promotion(move) &&
@@ -2093,10 +2196,9 @@ struct Searcher {
                 : 0;
             const bool lmr_quiet_candidate =
                 quiet_move &&
-                !pv_node &&
                 !checked &&
-                search_depth >= 3 &&
-                move_index >= 2;
+                ((!pv_node && search_depth >= 3 && move_index >= 2) ||
+                 (pv_node && search_depth >= 5 && move_index >= 4));
             const bool lmr_capture_candidate =
                 simple_capture &&
                 !pv_node &&
@@ -2373,9 +2475,15 @@ struct Searcher {
             lmr_node.all_node = !pv_node && move_is_none(tt_move);
             lmr_node.checked = checked;
             lmr_node.improving = improving;
+            lmr_node.exclusion_search = exclusion_search;
+            lmr_node.mate_window =
+                (alpha > -VALUE_INF && is_mate_window(alpha)) ||
+                (beta < VALUE_INF && is_mate_window(beta));
             lmr_node.tt_move_present = !move_is_none(tt_move);
             lmr_node.tt_move_is_capture =
                 !move_is_none(tt_move) && move_is_capture(tt_move);
+            lmr_node.static_eval = static_eval;
+            lmr_node.move_extension = move_extension;
             lmr_node.next_ply_cutoff_count = search_stack[ply + 1].cutoff_count;
             lmr_node.parent_reduction_fp = ply > 0 ? search_stack[ply - 1].reduction_fp : 0;
             lmr_node.tt_depth = probe.hit ? probe.data.depth : 0;
@@ -2389,6 +2497,7 @@ struct Searcher {
             lmr_move.quiet = quiet_move;
             lmr_move.capture = capture_move;
             lmr_move.simple_capture = simple_capture;
+            lmr_move.bad_capture = bad_capture;
             lmr_move.gives_check = gives_check;
             lmr_move.recapture = is_recapture_move(move, ply);
             lmr_move.promotion = move_is_promotion(move);
@@ -2401,6 +2510,10 @@ struct Searcher {
             lmr_move.see_bias_term = move_see_bias_term;
 
             const LmrDecision lmr = decide_lmr(lmr_node, lmr_move);
+#if MAGNUS_LMR_OBS
+            if (lmr_quiet_candidate || lmr_capture_candidate)
+                record_lmr_considered(lmr, quiet_move, simple_capture, pv_node);
+#endif
             ss.current_move = move;
             ss.move_count = legal_count;
             ss.stat_score = lmr.stat_score;
@@ -2414,6 +2527,7 @@ struct Searcher {
             const int new_depth = search_depth - 1 + move_extension;
             int score = 0;
             int searched_depth = new_depth;
+            bool lmr_reduced_fail_high = false;
             if (!searched_first) {
                 score = -pvs(pos, new_depth, -beta, -alpha, ply + 1, true);
                 searched_first = true;
@@ -2433,10 +2547,17 @@ struct Searcher {
                     score = -pvs(pos, reduced_depth, -alpha - 1, -alpha, ply + 1, true);
 
                     if (score > alpha) {
+                        lmr_reduced_fail_high = true;
+#if MAGNUS_LMR_OBS
+                        record_lmr_fail_high();
+#endif
                         const int lmr_best_floor = std::max(best_score, alpha);
                         const int research_depth =
                             lmr_research_depth(lmr, new_depth, score, alpha, lmr_best_floor);
                         if (research_depth > reduced_depth) {
+#if MAGNUS_LMR_OBS
+                            record_lmr_research();
+#endif
 #if MAGNUS_SEARCHSTATS_OBS
                             ++stats.lmr_researches;
                             ++stats.lmr_by_ply[std::min(ply, MAX_PLY - 1)];
@@ -2484,11 +2605,25 @@ struct Searcher {
                     else
                         ++stats.pvs_full_non_pv_node;
 #endif
+#if MAGNUS_LMR_OBS
+                    if (lmr.eligible)
+                        record_lmr_full_confirm();
+#endif
                     score = -pvs(pos, searched_depth, -beta, -alpha, ply + 1, true);
                 }
             }
 
             unmake_move(pos, move, mem.tables, st);
+
+            if (lmr_reduced_fail_high && score > alpha && score < beta) {
+                const int lmr_bonus_depth = std::max(1, search_depth / 4);
+                if (capture_move)
+                    history_tables.bonus_capture_fast(pos, move, lmr_bonus_depth);
+                else {
+                    history_tables.bonus_fast(pos, move, lmr_bonus_depth);
+                    history_tables.bonus_pawn_history_fast(pos, move, lmr_bonus_depth);
+                }
+            }
 
             if (quiet_move)
                 searched_quiets[searched_quiet_count++] = move;
@@ -2542,19 +2677,35 @@ struct Searcher {
                     );
                     // Continuation history bonuses with linear depth decay (was quadratic).
                     if (!move_is_capture(move)) {
-                        history_tables.bonus_continuation_fast(pos, prev3_move, move, std::max(1, depth / 2));
-                        history_tables.bonus_continuation_fast(pos, prev4_move, move, std::max(1, depth / 2));
+                        history_tables.bonus_continuation_fast(pos, prev3_move, move, std::max(1, search_depth / 2));
+                        history_tables.bonus_continuation_fast(pos, prev4_move, move, std::max(1, search_depth / 2));
                     }
                     // Near-miss bonus: first few quiets that almost cut get a small reward.
                     if (!move_is_capture(move) && searched_quiet_count > 1) {
-                        const int near_bonus_depth = std::max(1, depth / 4);
+                        const int near_bonus_depth = std::max(1, search_depth / 4);
                         for (int j = 0; j < std::min(3, searched_quiet_count); ++j)
                             history_tables.bonus_fast(pos, searched_quiets[j], near_bonus_depth);
                     }
+                    const int fail_low_malus_depth = std::max(
+                        1,
+                        std::min(search_depth, searched_depth)
+                    );
                     if (capture_move)
-                        history_tables.penalize_captures_fast(pos, searched_captures, searched_capture_count, move, depth);
+                        history_tables.penalize_captures_fast(
+                            pos,
+                            searched_captures,
+                            searched_capture_count,
+                            move,
+                            fail_low_malus_depth
+                        );
                     else {
-                        history_tables.penalize_quiets_fast(pos, searched_quiets, searched_quiet_count, move, depth);
+                        history_tables.penalize_quiets_fast(
+                            pos,
+                            searched_quiets,
+                            searched_quiet_count,
+                            move,
+                            fail_low_malus_depth
+                        );
                         history_tables.penalize_continuation_quiets_fast(
                             pos,
                             searched_quiets,
@@ -2562,7 +2713,7 @@ struct Searcher {
                             move,
                             prev_move,
                             prev2_move,
-                            depth
+                            fail_low_malus_depth
                         );
                     }
                     history_tables.penalize_see_bias_captures_fast(
@@ -2570,7 +2721,7 @@ struct Searcher {
                         searched_capture_see,
                         searched_capture_count,
                         move,
-                        depth
+                        fail_low_malus_depth
                     );
                     ++ss.cutoff_count;
                     cutoff = true;
@@ -3119,7 +3270,14 @@ void emit_iteration_info(
 
     stream << "info depth " << depth
            << " seldepth " << current.seldepth << ' ';
-    append_uci_score(stream, current.score, local_root, searcher.use_nnue());
+    append_uci_score(
+        stream,
+        current.score,
+        local_root,
+        searcher.use_mnue()
+            ? ScoreModel::Mnue
+            : (searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce)
+    );
     stream << " nodes " << nodes
            << " nps " << nps
            << " hashfull " << hashfull
@@ -3353,6 +3511,10 @@ void emit_iteration_info(
     if (local_out != nullptr && searcher.limits.report_info)
         searcher.emit_search_observation(*local_out);
 #endif
+#if MAGNUS_LMR_OBS
+    if (local_out != nullptr && searcher.limits.report_info)
+        searcher.emit_lmr_observation(*local_out);
+#endif
 
     return result;
 }
@@ -3466,7 +3628,7 @@ void emit_iteration_info(
         std::ostream& stream,
         memory::Memory& local_mem,
         const Position& local_root,
-        bool use_nnue,
+        ScoreModel score_model,
         const IterativeWorkerResult& result,
         Searcher::clock::time_point search_start,
         u64 nodes
@@ -3481,7 +3643,7 @@ void emit_iteration_info(
 
         stream << "info depth " << result.best.depth
                << " seldepth " << result.best.seldepth << ' ';
-        append_uci_score(stream, result.best.score, local_root, use_nnue);
+        append_uci_score(stream, result.best.score, local_root, score_model);
         stream << " nodes " << nodes
                << " nps " << nps
                << " hashfull " << hashfull
@@ -3546,7 +3708,9 @@ void emit_iteration_info(
             *out,
             mem,
             root,
-            main_searcher.use_nnue(),
+            main_searcher.use_mnue()
+                ? ScoreModel::Mnue
+                : (main_searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce),
             best,
             search_start,
             best.best.nodes
