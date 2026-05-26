@@ -3,69 +3,174 @@
 ## 中文
 
 ### 概述
-`Attack.cpp` 实现了国际象棋中滑行棋子（象、车、后）的攻击掩码生成，以及 X 射线攻击和几何对齐检查。它支持三种后端实现，可在编译期或运行时选择。
+`Attack.cpp` 实现了国际象棋中滑行棋子（象、车、后）的攻击掩码生成，以及非滑行棋子（兵、马、王）的预计算查表和几何工具函数。支持四种后端实现，可在编译期或运行时选择。
 
-### 核心技术
+### 命名空间
+所有攻击函数位于 `namespace magnus`（`Attack.h` 不引入独立命名空间）。
 
-#### 三种后端实现
+### 四种后端实现
 
-1. **Classical（经典）** — 纯射线扫描，直接循环扫描棋子的对角线/直线方向，遇到阻挡即停止。无预计算表，内存占用为零。
+| 后端 | 枚举值 | 描述 |
+|------|--------|------|
+| **Classical** | `CLASSICAL` | 纯射线扫描，直接循环扫描对角线/直线方向，遇阻挡停止。零预计算表，零内存。 |
+| **Dense Table** | `TABLE` | 预计算密度表，`(occupancy * magic) >> shift` 索引。内存约 107KB。 |
+| **Magic** | `MAGIC` | 魔法位棋盘变体，使用不同的索引方案。 |
+| **BMI2 / PEXT** | `PEXT` | 使用 BMI2 `_pext_u64` 提取相关占领位。需要 x86 BMI2 硬件。最快方案。 |
 
-2. **Dense Table（密集表）** — 预计算 `AttackTable`，存储每个格子每种 ocupancy 组合的攻击掩码。查找时使用 `(occupancy * magic) >> shift` 作为索引。占用内存约 107KB。
-
-3. **BMI2 / PEXT** — 使用 BMI2 指令集的 `_pext_u64` 提取相关占领位，直接作为查找表索引。需要 x86 BMI2 硬件支持。这是三种方案中最快的。
-
-#### 后端选择
-- `attack_init_backend()` — 根据编译宏（`ATTACK_BACKEND_CLASSICAL` / `ATTACK_BACKEND_DENSE` 或 `ATTACK_BACKEND_AUTO`）初始化对应的后端函数指针
-- 运行时动态分派：`bishop_attacks_fn()`、`rook_attacks_fn()` 等函数指针在初始化后指向选定的实现
-
-### 关键函数
+#### 后端选择 API
 
 | 函数 | 描述 |
 |------|------|
-| `bishop_attacks()` / `rook_attacks()` | 生成象/车的攻击掩码（通过分派表） |
-| `queen_attacks()` | 象 + 车的并集 |
-| `xray_bishop_attacks()` / `xray_rook_attacks()` | X 射线攻击，穿透被阻挡的格子 |
-| `aligned()` | 检查两个格子是否在同一对角线或直线上 |
-| `between()` | 返回两格之间（不含端点）的所有格子 |
-| `ray()` | 返回从一格出发经另一格延伸的射线 |
+| `attack_init_backend(mem)` | 初始化后端（根据编译宏或自动检测） |
+| `attack_set_backend(kind)` | 手动设置后端 |
+| `attack_auto_select_backend()` | 自动选择最佳后端 |
+| `attack_backend_kind()` | 返回当前后端枚举 |
+| `attack_backend_name()` | 返回当前后端名称字符串 |
+| `attack_backend_uses_slider_tables()` | 是否使用滑子查表 |
+| `attack_backend_pext_supported()` | PEXT 指令是否可用 |
+
+### 关键函数签名（所有需要 `const memory::Memory& mem` 参数）
+
+#### 滑子攻击（依赖后端选择）
+
+| 函数 | 描述 |
+|------|------|
+| `bishop_attacks(mem, sq, occupied)` | 象的攻击掩码 |
+| `rook_attacks(mem, sq, occupied)` | 车的攻击掩码 |
+| `queen_attacks(mem, sq, occupied)` | 后的攻击掩码（象 ∪ 车） |
+| `bishop_rays(sq)` | 象的射线掩码（无阻挡） |
+| `rook_rays(sq)` | 车的射线掩码 |
+| `queen_rays(sq)` | 后的射线掩码 |
+| `bishop_xray_attacks(mem, sq, occupied, blockers)` | 象的 X 射线攻击（穿透 blockers） |
+| `rook_xray_attacks(mem, sq, occupied, blockers)` | 车的 X 射线攻击 |
+
+#### 非滑子攻击（查表，O(1)）
+
+| 函数 | 描述 |
+|------|------|
+| `pawn_attacks(mem, color, sq)` | 兵的吃子掩码 |
+| `knight_attacks(mem, sq)` | 马的攻击掩码 |
+| `king_attacks(mem, sq)` | 王的攻击掩码 |
+
+#### 几何工具
+
+| 函数 | 描述 |
+|------|------|
+| `between_bb(mem, a, b)` | 两格之间的格子（不含端点） |
+| `line_bb(mem, a, b)` | 两格所在的线（直线或对角线） |
+| `chebyshev_distance(mem, a, b)` | 切比雪夫距离 |
+| `manhattan_distance(mem, a, b)` | 曼哈顿距离 |
+
+#### 滑子表元数据
+
+| 函数 | 描述 |
+|------|------|
+| `bishop_slider_entry(sq)` | 返回象在 sq 的滑子表条目 |
+| `rook_slider_entry(sq)` | 返回车在 sq 的滑子表条目 |
+| `bishop_slider_table_size()` | 象滑子表总条目数 |
+| `rook_slider_table_size()` | 车滑子表总条目数 |
+
+### 内部类型
+
+| 类型 | 描述 |
+|------|------|
+| `AttackBackendKind` | 枚举：CLASSICAL / TABLE / MAGIC / PEXT |
+| `SliderAttackEntry` | 滑子表条目：mask, offset, relevant_bits, shift |
+| `AttackBitboard` | `memory::Bitboard` 的别名 |
+| `AttackColor` | `memory::Color` 的别名 |
+| `AttackKey` | `memory::Key` 的别名 |
 
 ### 内存布局
-- `BishopTable`：64 个格子 × 512 个条目（9 位索引）= 32K 条目
-- `RookTable`：64 个格子 × 4096 个条目（12 位索引）= 256K 条目
+- `BishopTable`：64 格 × 512 条目（9 位索引）= 32K 条目
+- `RookTable`：64 格 × 4096 条目（12 位索引）= 256K 条目
+
+### 设计要点
+- 所有滑子攻击函数需要 `const memory::Memory& mem` 参数（依赖注入模式）
+- 非滑子攻击（兵/马/王）从预计算表 O(1) 查表，不依赖后端
+- 运行时动态分派：函数指针在后端初始化后指向选定实现
+- 滑子表元数据通过 `bishop_slider_entry()` / `rook_slider_entry()` 访问
 
 ---
 
 ## English
 
 ### Overview
-`Attack.cpp` implements attack mask generation for sliding pieces (bishop, rook, queen), as well as X-ray attacks and geometric alignment checks for a chess engine. It supports three backend implementations selectable at compile time or runtime.
+`Attack.cpp` implements attack mask generation for sliding pieces (bishop, rook, queen), precomputed lookups for non-sliding pieces (pawn, knight, king), and geometric utility functions. Supports four backend implementations selectable at compile time or runtime.
 
-### Core Technology
+### Namespace
+All attack functions reside in `namespace magnus`.
 
-#### Three Backend Implementations
+### Four Backend Implementations
 
-1. **Classical** — Pure ray scanning, directly loops through diagonal/orthogonal directions, stopping at the first blocker. Zero precomputation tables, zero memory footprint.
+| Backend | Enum | Description |
+|---------|------|-------------|
+| **Classical** | `CLASSICAL` | Pure ray scanning, zero precomputation |
+| **Dense Table** | `TABLE` | Precomputed density table, ~107KB memory |
+| **Magic** | `MAGIC` | Magic bitboard variant |
+| **BMI2 / PEXT** | `PEXT` | BMI2 `_pext_u64` extraction, requires x86 BMI2 |
 
-2. **Dense Table** — Precomputed `AttackTable` storing attack masks for every square × occupancy combination. Lookup uses `(occupancy * magic) >> shift` as the index. Memory footprint ~107KB.
-
-3. **BMI2 / PEXT** — Uses the BMI2 instruction set's `_pext_u64` to extract relevant occupancy bits, directly used as a lookup table index. Requires x86 BMI2 hardware support. Fastest of the three.
-
-#### Backend Selection
-- `attack_init_backend()` — Initializes backend function pointers based on compile macros (`ATTACK_BACKEND_CLASSICAL`, `ATTACK_BACKEND_DENSE`, or `ATTACK_BACKEND_AUTO`)
-- Runtime dispatch: function pointers like `bishop_attacks_fn()` and `rook_attacks_fn()` point to the selected implementation after initialization
-
-### Key Functions
+#### Backend Selection API
 
 | Function | Description |
 |----------|-------------|
-| `bishop_attacks()` / `rook_attacks()` | Generate bishop/rook attack masks (via dispatch table) |
-| `queen_attacks()` | Union of bishop + rook |
-| `xray_bishop_attacks()` / `xray_rook_attacks()` | X-ray attacks, penetrating through an occupied square |
-| `aligned()` | Checks if two squares lie on the same diagonal or orthogonal |
-| `between()` | Returns all squares between two squares (exclusive) |
-| `ray()` | Returns the ray from one square extending through another |
+| `attack_init_backend(mem)` | Initialize backend (compile macro or auto-detect) |
+| `attack_set_backend(kind)` | Manually set backend |
+| `attack_auto_select_backend()` | Auto-select best backend |
+| `attack_backend_kind()` | Current backend enum |
+| `attack_backend_name()` | Current backend name string |
+| `attack_backend_uses_slider_tables()` | Whether slider tables are used |
+| `attack_backend_pext_supported()` | Whether PEXT is available |
 
-### Memory Layout
-- `BishopTable`: 64 squares × 512 entries (9-bit index) = 32K entries
-- `RookTable`: 64 squares × 4096 entries (12-bit index) = 256K entries
+### Key Function Signatures (all require `const memory::Memory& mem`)
+
+#### Slider Attacks (backend-dependent)
+
+| Function | Description |
+|----------|-------------|
+| `bishop_attacks(mem, sq, occupied)` | Bishop attack mask |
+| `rook_attacks(mem, sq, occupied)` | Rook attack mask |
+| `queen_attacks(mem, sq, occupied)` | Queen attack mask (bishop ∪ rook) |
+| `bishop_rays(sq)` | Bishop ray mask (no blockers) |
+| `rook_rays(sq)` | Rook ray mask |
+| `queen_rays(sq)` | Queen ray mask |
+| `bishop_xray_attacks(mem, sq, occupied, blockers)` | Bishop X-ray (through blockers) |
+| `rook_xray_attacks(mem, sq, occupied, blockers)` | Rook X-ray |
+
+#### Non-Sliding Attacks (table lookup, O(1))
+
+| Function | Description |
+|----------|-------------|
+| `pawn_attacks(mem, color, sq)` | Pawn capture mask |
+| `knight_attacks(mem, sq)` | Knight attack mask |
+| `king_attacks(mem, sq)` | King attack mask |
+
+#### Geometry Utilities
+
+| Function | Description |
+|----------|-------------|
+| `between_bb(mem, a, b)` | Squares between a and b (exclusive) |
+| `line_bb(mem, a, b)` | Line (rank/file/diagonal) through a and b |
+| `chebyshev_distance(mem, a, b)` | Chebyshev distance |
+| `manhattan_distance(mem, a, b)` | Manhattan distance |
+
+#### Slider Table Metadata
+
+| Function | Description |
+|----------|-------------|
+| `bishop_slider_entry(sq)` | Bishop slider entry for square |
+| `rook_slider_entry(sq)` | Rook slider entry for square |
+| `bishop_slider_table_size()` | Total bishop slider table entries |
+| `rook_slider_table_size()` | Total rook slider table entries |
+
+### Internal Types
+
+| Type | Description |
+|------|-------------|
+| `AttackBackendKind` | Enum: CLASSICAL / TABLE / MAGIC / PEXT |
+| `SliderAttackEntry` | Slider entry: mask, offset, relevant_bits, shift |
+
+### Design Notes
+- All slider attack functions require `const memory::Memory& mem` (dependency injection)
+- Non-slider attacks (pawn/knight/king) use precomputed table lookups, O(1), no backend dependency
+- Runtime dispatch: function pointers redirected after backend initialization
+- Slider table metadata accessible via `bishop_slider_entry()` / `rook_slider_entry()`

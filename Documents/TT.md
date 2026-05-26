@@ -3,159 +3,118 @@
 ## 中文
 
 ### 概述
-`TT.cpp` 实现了 MagnusChess 引擎的**置换表（Transposition Table, TT）**，这是搜索系统的核心缓存结构。它使用 4 路组相联哈希桶、无锁原子操作和节电替换策略，为搜索提供高效的局面缓存。
+`TT.cpp` 实现了 MagnusChess 引擎的**置换表（Transposition Table, TT）**，是搜索系统的核心缓存结构。使用 4 路组相联哈希桶、64 字节对齐的缓存行布局和深度-年龄替换策略。
 
-### 核心架构
+### 命名空间
+所有类型和函数位于 `namespace magnus::memory`。
 
-#### 数据结构
+### 核心结构
 
-**`TTCluster`** — 4 路组相联桶，每个桶包含 4 个 `TTEntry`：
-```
-struct TTCluster {
-    TTEntry entries[4];
-};
-```
+#### TTCluster（64 字节对齐）
 
-**`TTEntry`** 包含：
-- `key16` — Zobrist key 的高 16 位（签名），用于快速匹配
-- `move` — 最佳走法
-- `score` — 搜索分数
-- `eval` — 静态评估
-- `depth` — 搜索深度
-- `generation` — 年龄（用于替换决策，2 位）
-- `bound` — 边界类型（精确值/下界/上界）
-- `pad` — 对齐填充
+物理存储 4 个打包的 TT 条目，每个条目按列存储：
 
-**`TT`** 结构体：
-- `clusters` — `TTCluster` 数组（总大小 = `hash_mb / sizeof(TTCluster)` MB）
-- `hash_mask` — 桶索引掩码
+| 字段数组 | 类型 | 描述 |
+|---------|------|------|
+| `tag32[4]` | u32 | 32 位标签（key 的高位，用于快速匹配） |
+| `move[4]` | u16 | 最佳走法 |
+| `score[4]` | i16 | 搜索分数 |
+| `eval[4]` | i16 | 静态评估 |
+| `depth[4]` | i16 | 搜索深度 |
+| `age[4]` | u8 | 年龄（用于替换决策） |
+| `flags[4]` | u8 | 边界类型（NONE/UPPER/LOWER/EXACT） |
 
-#### 哈希索引方案
+#### TTData（逻辑视图）
 
-```
-bucket_index = hash_key & hash_mask
-cluster = &clusters[bucket_index]
-```
-在 4 路桶中线性搜索匹配的 `key16`。
+单个条目的逻辑表示：`tag32, move, score, eval, depth, age, flags, spare`。
 
-#### 无锁原子操作
+#### TT 结构体
 
-TT 使用 `std::atomic_ref<i64>` 对每个条目进行原子读写，允许在多线程搜索中无锁并行访问（lockless hashing）。写入是原子的，读取不需要锁定。
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `clusters` | TTCluster* | 桶数组 |
+| `cluster_count` | size_t | 桶数量 |
+| `cluster_mask` | size_t | 索引掩码 |
+| `locks` | atomic_flag* | 细粒度锁数组 |
+| `generation` | u8 | 当前搜索代数 |
 
-### 核心算法
+#### 边界类型（Bound）
 
-#### 探测（`tt_probe()`）
-1. 计算 `bucket_index = key & hash_mask`
-2. 遍历桶中 4 个条目
-3. 找到 `key16` 匹配的条目 → 返回绑定类型、分数、深度、走法和评估
-4. 同时返回最佳替换槽（考虑深度和年龄）
+| 枚举值 | 描述 |
+|--------|------|
+| `BOUND_NONE` | 无效条目 |
+| `BOUND_UPPER` | 上界（搜索分数 ≤ 真实值） |
+| `BOUND_LOWER` | 下界（搜索分数 ≥ 真实值） |
+| `BOUND_EXACT` | 精确值 |
 
-#### 保存（`tt_save()`）
-替换策略：
-1. 优先覆盖空槽位
-2. 在有占用的槽位中，选择最"可替换"的：
-   - 来自旧搜索世代的条目优先替换
-   - 浅深度条目优先替换
-   - 综合评分 = `depth - 4 * generation_delta`
+### 核心 API
 
-#### 哈希满度（`tt_hashfull()`）
-通过对前 1000 个桶采样，估算 TT 的占用率（permille），用于 UCI 报告。
+| 函数 | 描述 |
+|------|------|
+| `tt_index(tt, key)` | 计算 `key & cluster_mask` 索引 |
+| `tt_prefetch(tt, key)` | 软件预取 TT 桶（减少缓存未命中） |
+| `tt_probe(tt, key)` | 探测 TT，返回 `TTProbe`（hit, slot, data） |
+| `tt_save(tt, key, move, score, eval, depth, bound, pv)` | 保存条目（含替换策略） |
+| `tt_hashfull(tt, max_age)` | 估算 TT 占用率（千分比） |
+| `tt_clear(tt)` | 清空 TT |
+| `tt_resize_mb(tt, mb)` | 调整 TT 大小（MB） |
+| `tt_new_search(tt)` | 新搜索开始（递增 generation） |
+| `tt_free(tt)` | 释放 TT 内存 |
 
-### 配合搜索的使用方式
+### 替换策略
 
-```
-tt_probe(tt, pos.state_key, tt_hit)
-    ↓
-if (tt_hit && tt_score >= beta) return tt_score;  // β 剪枝
-    ↓
-... 搜索 ...
-    ↓
-tt_save(tt, pos.state_key, best_move, best_score, depth, bound, generation);
-```
+`tt_replacement_score(cluster, lane, current_age)` 计算替换优先级：
+- 优先覆盖空槽位
+- 旧世代条目优先替换
+- 浅深度条目优先替换
 
 ### 设计要点
-- 无锁设计（lockless hashing）支持多线程并发读写
-- 4 路组相联减少冲突未命中
-- 2 位 generation 字段实现轻量级年龄跟踪
-- 原子 64 位写入/读取保证条目一致性
+- 64 字节对齐的集群布局确保一个缓存行内完成探测/存储
+- 细粒度锁数组支持多线程并发
+- `tt_prefetch()` 软件预取减少搜索热路径的缓存延迟
+- `tt_hashfull()` 采样前 1000 个桶估算占用率
 
 ---
 
 ## English
 
 ### Overview
-`TT.cpp` implements the **Transposition Table (TT)** for the MagnusChess engine, the core caching structure of the search system. It uses 4-way set-associative hash buckets, lockless atomic operations, and a conservative replacement policy to provide efficient position caching.
+`TT.cpp` implements the **Transposition Table (TT)** for the MagnusChess engine, the core caching structure of the search system. Uses 4-way set-associative hash buckets with 64-byte aligned cache-line layout and depth-age replacement policy.
 
-### Core Architecture
+### Namespace
+All types and functions reside in `namespace magnus::memory`.
 
-#### Data Structures
+### Core Structures
 
-**`TTCluster`** — 4-way set-associative bucket, each bucket contains 4 `TTEntry`:
-```
-struct TTCluster {
-    TTEntry entries[4];
-};
-```
+#### TTCluster (alignas 64)
 
-**`TTEntry`** contains:
-- `key16` — Upper 16 bits of Zobrist key (signature) for fast matching
-- `move` — Best move
-- `score` — Search score
-- `eval` — Static evaluation
-- `depth` — Search depth
-- `generation` — Age (for replacement decisions, 2 bits)
-- `bound` — Bound type (exact / lower bound / upper bound)
-- `pad` — Alignment padding
+Columnar storage of 4 packed entries: `tag32[4]`, `move[4]`, `score[4]`, `eval[4]`, `depth[4]`, `age[4]`, `flags[4]`.
 
-**`TT`** struct:
-- `clusters` — Array of `TTCluster` (total size = `hash_mb / sizeof(TTCluster)` MB)
-- `hash_mask` — Mask for bucket indexing
+#### TTData (Logical View)
 
-#### Hash Indexing Scheme
+Single entry: `tag32, move, score, eval, depth, age, flags, spare`.
 
-```
-bucket_index = hash_key & hash_mask
-cluster = &clusters[bucket_index]
-```
-Linear search within the 4-way bucket for matching `key16`.
+#### Bound Types
 
-#### Lockless Atomic Operations
+`BOUND_NONE`, `BOUND_UPPER`, `BOUND_LOWER`, `BOUND_EXACT`.
 
-TT uses `std::atomic_ref<i64>` for atomic reads/writes of each entry, enabling lockless parallel access in multi-threaded search. Writes are atomic, reads require no locking.
+### Core API
 
-### Core Algorithms
+| Function | Description |
+|----------|-------------|
+| `tt_index(tt, key)` | Compute `key & cluster_mask` |
+| `tt_prefetch(tt, key)` | Software prefetch TT bucket |
+| `tt_probe(tt, key)` | Probe TT, returns `TTProbe` (hit, slot, data) |
+| `tt_save(tt, key, move, score, eval, depth, bound, pv)` | Save entry with replacement policy |
+| `tt_hashfull(tt)` | Estimate occupancy (permille) |
+| `tt_clear` / `tt_resize_mb` / `tt_new_search` / `tt_free` | Lifecycle management |
 
-#### Probing (`tt_probe()`)
-1. Compute `bucket_index = key & hash_mask`
-2. Iterate over 4 entries in the bucket
-3. Find entry with matching `key16` → return bound type, score, depth, move, and evaluation
-4. Also return the best replacement slot (considering depth and age)
+### Replacement Policy
 
-#### Saving (`tt_save()`)
-Replacement policy:
-1. Prefer overwriting empty slots
-2. Among occupied slots, select the most "replaceable":
-   - Entries from older search generations are preferred for replacement
-   - Shallow depth entries are preferred
-   - Composite score = `depth - 4 * generation_delta`
-
-#### Hash Full (`tt_hashfull()`)
-Estimates TT occupancy (permille) by sampling the first 1000 buckets, used for UCI reporting.
-
-### Usage with Search
-
-```
-tt_probe(tt, pos.state_key, tt_hit)
-    ↓
-if (tt_hit && tt_score >= beta) return tt_score;  // β cutoff
-    ↓
-... search ...
-    ↓
-tt_save(tt, pos.state_key, best_move, best_score, depth, bound, generation);
-```
+Prefer empty slots, then older generations, then shallower depth.
 
 ### Design Notes
-- Lockless design (lockless hashing) supports multi-threaded concurrent reads/writes
-- 4-way set-associativity reduces conflict misses
-- 2-bit generation field provides lightweight age tracking
-- Atomic 64-bit writes/reads guarantee entry consistency
+- 64-byte aligned clusters: probe/store within one cache line
+- Fine-grained lock array for multi-threaded concurrency
+- `tt_prefetch()` software prefetch reduces cache latency in search hot path
+- `tt_hashfull()` samples first 1000 buckets for occupancy estimation

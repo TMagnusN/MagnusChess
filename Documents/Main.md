@@ -3,24 +3,36 @@
 ## 中文
 
 ### 概述
-`Main.cpp` 是 MagnusChess 国际象棋引擎的入口文件。它负责解析命令行参数，然后根据子命令将控制流分派到对应的子系统。
+`Main.cpp` 是 MagnusChess 国际象棋引擎的入口文件。它负责解析命令行参数，根据子命令将控制流分派到对应的子系统。
 
 ### 核心功能
 
-**`main()`** 函数是整个引擎的启动点。它调用静态函数 `run()`。
+**`main()`** 函数直接包含所有分发逻辑：
 
-**`run()`** 函数执行以下逻辑：
-1. 检查命令行参数数量
-2. 如果 argc == 1（无子命令），调用 `run_uci()` 进入标准 UCI 协议模式
-3. 如果提供了子命令：
-   - `"uci"` — 调用 `run_uci()`
-   - `"bench"` — 解析可选的深度/时间参数，调用 `run_bench()`
-   - `"perft"` — 调用 `run_perft()` 执行性能测试
-   - 其他 — 输出帮助信息
+1. 在 Windows 上设置控制台编码为 UTF-8 并启用虚拟终端处理（ANSI 转义序列支持）
+2. 如果 `argc <= 1`（无子命令）→ 调用 `magnus::run_uci()` 进入 UCI 协议模式
+3. 如果 `argv[1] == "uci"` → 调用 `magnus::run_uci()`
+4. 其他所有情况 → 调用 `magnus::run_bench(argc, argv)` 进入基准测试模式
+
+注意：`perft` 不是独立的 CLI 子命令；perft 功能通过 `bench` 命令内部的 `BenchConfig::perft_depth` 参数使用。
+
+### 运行模式
+
+| 模式 | 触发条件 | 入口函数 |
+|------|---------|---------|
+| UCI 通信 | 无参数 或 `uci` | `magnus::run_uci()` |
+| 基准测试 | 其他所有参数 | `magnus::run_bench(argc, argv)` |
+
+### Windows 平台初始化
+
+在 `_WIN32` 平台上，`main()` 执行以下初始化：
+- `SetConsoleOutputCP(CP_UTF8)` — 控制台输出 UTF-8
+- `SetConsoleCP(CP_UTF8)` — 控制台输入 UTF-8
+- `SetConsoleMode(..., ENABLE_VIRTUAL_TERMINAL_PROCESSING)` — 启用 ANSI 转义序列
 
 ### 设计要点
-- 设计极简，只做命令路由，所有具体逻辑委托给对应模块
-- 支持三种运行模式：UCI 通信模式、搜索基准测试、走法生成测试
+- 极简设计：`main()` 只做平台初始化和命令路由，所有具体逻辑委托给 `run_uci()` 和 `run_bench()`
+- 两种运行模式：UCI 通信模式 和 基准测试模式（bench 内部支持 perft、divide、搜索基准等多种子模式）
 
 ---
 
@@ -31,17 +43,29 @@
 
 ### Core Functionality
 
-**`main()`** is the engine's launch point. It calls the static function `run()`.
+**`main()`** contains all dispatch logic directly:
 
-**`run()`** performs the following logic:
-1. Checks the number of command-line arguments
-2. If argc == 1 (no subcommand), calls `run_uci()` to enter standard UCI protocol mode
-3. If a subcommand is provided:
-   - `"uci"` — calls `run_uci()`
-   - `"bench"` — parses optional depth/time parameters and calls `run_bench()`
-   - `"perft"` — calls `run_perft()` for performance testing
-   - Otherwise — outputs help information
+1. On Windows, sets console encoding to UTF-8 and enables virtual terminal processing (ANSI escape sequence support)
+2. If `argc <= 1` (no subcommand) → calls `magnus::run_uci()` to enter UCI protocol mode
+3. If `argv[1] == "uci"` → calls `magnus::run_uci()`
+4. All other cases → calls `magnus::run_bench(argc, argv)` to enter benchmark mode
+
+Note: `perft` is not a standalone CLI subcommand; perft functionality is accessed through the `bench` command via `BenchConfig::perft_depth`.
+
+### Runtime Modes
+
+| Mode | Trigger | Entry function |
+|------|---------|---------------|
+| UCI communication | No arguments or `uci` | `magnus::run_uci()` |
+| Benchmark | Everything else | `magnus::run_bench(argc, argv)` |
+
+### Windows Platform Initialization
+
+On `_WIN32`, `main()` performs:
+- `SetConsoleOutputCP(CP_UTF8)` — UTF-8 console output
+- `SetConsoleCP(CP_UTF8)` — UTF-8 console input
+- `SetConsoleMode(..., ENABLE_VIRTUAL_TERMINAL_PROCESSING)` — Enable ANSI escape sequences
 
 ### Design Notes
-- Extremely minimal design, only performs command routing; all concrete logic is delegated to corresponding modules
-- Supports three runtime modes: UCI communication mode, search benchmark, and move generation testing
+- Minimal design: `main()` only does platform initialization and command routing; all concrete logic is delegated to `run_uci()` and `run_bench()`
+- Two runtime modes: UCI communication mode and benchmark mode (bench internally supports perft, divide, search benchmarks, and more sub-modes)

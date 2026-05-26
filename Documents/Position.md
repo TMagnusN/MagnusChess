@@ -3,63 +3,119 @@
 ## 中文
 
 ### 概述
-`Position.cpp` 实现了 MagnusChess 引擎的棋盘状态表示与操作。它采用混合架构，将邮箱数组（mailbox）、位棋盘（bitboard）、增量评估和 Zobrist 哈希结合为一体，支持完整的走法执行与撤销。
+`Position.cpp` 实现了 MagnusChess 引擎的棋盘状态表示与操作。它采用混合架构，将邮箱数组（mailbox）、位棋盘（bitboard）、增量评估、Zobrist 哈希和 NNUE/MNUE 累加器结合为一体，支持完整的走法执行与撤销。
 
-### 核心架构
+### Position 结构体核心字段
 
-#### 数据结构
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `side_to_move` | int | 当前走子方（WHITE/BLACK） |
+| `ep_sq` | Square | 过路兵目标格（NO_SQ=无） |
+| `castling_rights` | int | 王车易位权限位掩码 |
+| `halfmove_clock` | int | 半回合计数器（50 步规则） |
+| `fullmove_number` | int | 完整回合数 |
+| `king_sq[COLOR_NB]` | Square[] | 双方王的位置缓存 |
+| `color_bb[COLOR_NB]` | Bitboard[] | 按颜色占领位棋盘 |
+| `piece_bb[PIECE_NB]` | Bitboard[] | 按棋子类型位棋盘 |
+| `occupied` | Bitboard | 所有棋子并集 |
+| `piece_counts[COLOR_NB][PIECE_NB]` | u8[][] | 按颜色+类型的棋子计数 |
+| `non_king_material` | u8 | 非王子力标志 |
+| `material_signature` | Key | 材料配置哈希（材料表索引） |
+| `eval_mg[COLOR_NB]` | int[] | 中局增量评估（按颜色） |
+| `eval_eg[COLOR_NB]` | int[] | 残局增量评估（按颜色） |
+| `eval_phase` | int | 局面阶段值（MG/EG 插值） |
+| `key` | Key | 完整 Zobrist 哈希键 |
+| `board[SQ_NB]` | int[] | 邮箱数组（O(1) 格子查询） |
 
-`Position` 结构体包含以下核心成员：
+#### NNUE 累加器
 
-- **邮箱数组** `board[64]` — 直接按格子索引查询棋子，O(1)
-- **位棋盘** `piece_bb[PIECE_NB]` — 每种棋子类型一个位棋盘，高效批量操作
-- **颜色位棋盘** `color_bb[COLOR_NB]` — 白方/黑方占领集
-- **总占领** `occupied` — 所有棋子的并集
-- **增量评估** `psqt_score` — 中局/残局的 PSQT 增量累积值
-- **阶段值** `phase` — 用于中局/残局分数插值
-- **Zobrist 键** `state_key` — 完整棋盘哈希
-- **pawn_key** — 仅兵的哈希，用于兵形历史
-- **material_key** — 材料配置哈希，用于材料表
-- **StateInfo 栈** — 存储 `captured_piece`、`en_passant`、`castling_rights`、`rule50`、`prev_key`、`prev_psqt` 等增量回滚所需信息
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `nnue_generation` | u32 | NNUE 累加器代数（惰性刷新） |
+| `nnue_acc_valid` | bool | NNUE 累加器是否有效 |
+| `nnue_acc[COLOR_NB][kHiddenSize]` | i16[][] | NNUE 双视角隐藏层累加器（alignas(64)） |
 
-#### 走法执行流程
+#### MNUE-P2 累加器
 
-**`make_move()`**：
-1. 将当前状态存入 `StateInfo` 栈
-2. 更新移动棋子：从 from 移除，放置到 to
-3. 更新增量 PSQT 分数和阶段值
-4. 更新 Zobrist 键（棋子、城堡权、过路兵、side-to-move）
-5. 处理特殊走法：
-   - **吃子**：移除被吃棋子，更新 PSQT/phase/key
-   - **双步兵**：设置 en passant 目标格
-   - **王车易位**：同时移动车
-   - **升变**：替换兵为新棋子类型
-   - **吃过路兵**：移除被吃的兵
-6. 更新城堡权、rule50 计数器、切换走棋方
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `mnue_p2_generation` | u32 | P2 累加器代数 |
+| `mnue_p2_acc_valid_mask` | u8 | P2 累加器有效掩码（按颜色） |
+| `mnue_p2_acc[COLOR_NB][1024]` | i16[][] | P2 增量累加器（alignas(64)） |
 
-**`unmake_move()`**：
-1. 从 StateInfo 栈弹出保存的状态
-2. 恢复所有被修改的字段（board, piece_bb, color_bb, occupied, key, psqt, phase 等）
+### StateInfo 结构体
 
-**`do_move_copy()`** — 创建副本执行走法，用于 perft 验证，不修改原棋盘。
+走法撤销信息，存储在 `make_move`/`unmake_move` 的栈中：
 
-#### 辅助函数
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `castling_rights` | int | 走法前的易位权限 |
+| `ep_sq` | Square | 走法前的过路兵格 |
+| `halfmove_clock` | int | 走法前的半回合计数 |
+| `fullmove_number` | int | 走法前的完整回合数 |
+| `key` | Key | 走法前的 Zobrist 键 |
+| `captured` | Piece | 被吃的棋子（PIECE_NONE=无） |
+| `captured_sq` | Square | 被吃棋子所在格 |
+
+### 便捷访问器（内联函数）
 
 | 函数 | 描述 |
 |------|------|
-| `position_put_piece()` | 在格子上放置棋子，更新位棋盘和评估 |
-| `position_remove_piece()` | 移除棋子 |
-| `position_move_piece()` | 移动棋子（原子 from→to） |
-| `set_start_position()` | 设置标准国际象棋初始局面 |
-| `piece_type_on()` | 查询格子上的棋子类型 |
-| `pieces()` | 获取某方某类型的位棋盘 |
-| `is_draw()` | 检查是否为和棋（50 步规则/重复） |
-| `has_non_pawn_material()` | 检查某方是否有非兵子力 |
-| `see_ge()` | 委托到 See.cpp 的 SEE 评估 |
+| `us(pos)` / `them(pos)` | 当前走子方 / 对方 |
+| `pieces(pos)` | 全部占领位棋盘 |
+| `pieces(pos, color)` | 某颜色占领位棋盘 |
+| `pieces_of_type(pos, pt)` | 某棋子类型位棋盘 |
+| `pieces(pos, color, pt)` | 某颜色+类型位棋盘 |
+| `piece_count(pos, color, pt)` | 某颜色+类型的棋子数 |
+| `non_king_material(pos)` | 非王子力标志 |
+| `packed_material_signature(pos)` | 材料签名 |
+| `king_square(pos, color)` | 某方王的位置 |
+| `has_ep(pos)` | 是否有过路兵 |
+| `piece_on(pos, sq)` | 格上棋子（Piece） |
+| `color_on(pos, sq)` | 格上棋子的颜色 |
+| `piece_type_on(pos, sq)` | 格上棋子的类型 |
+| `empty_on(pos, sq)` / `occupied_on(pos, sq)` | 格子是否空/有子 |
+
+### 走法执行
+
+| 函数 | 描述 |
+|------|------|
+| `make_move(pos, m, st)` | 执行走法，StateInfo 入栈 |
+| `unmake_move(pos, m)` | 撤销走法，StateInfo 出栈 |
+| `do_move_copy(pos, m)` | 创建副本执行走法（perft 用） |
+
+### 局面操作
+
+| 函数 | 描述 |
+|------|------|
+| `position_clear(pos)` | 清空局面 |
+| `position_put_piece(pos, color, pt, sq)` | 放置棋子（更新位棋盘+评估） |
+| `position_remove_piece(pos, color, pt, sq)` | 移除棋子 |
+| `position_move_piece(pos, color, pt, from, to)` | 移动棋子 |
+| `position_recompute_occupied(pos)` | 从 piece_bb 重建 occupied |
+| `position_refresh_king_squares(pos)` | 从 board 重建 king_sq |
+| `position_compute_key(pos, tables)` | 从零计算 Zobrist 键 |
+| `position_refresh_key(pos, tables)` | 刷新 Zobrist 键 |
+
+### 验证
+
+| 函数 | 描述 |
+|------|------|
+| `position_has_valid_kings(pos)` | 双方各有一个王 |
+| `position_board_matches_bitboards(pos)` | board 与 bitboard 一致性检查 |
+
+### 走法合法性
+
+| 函数 | 描述 |
+|------|------|
+| `legal(pos, mem, move)` | 完整合法性检查（执行走法后验证） |
+| `pseudo_legal_fast(pos, mem, info, move)` | 伪合法性快速检查 |
 
 ### 设计要点
-- 所有更新是增量的，`make_move`/`unmake_move` 仅修改涉及到的字段
-- Zobrist 键通过异或运算增量更新，与 `tables_init_zobrist()` 生成的随机数表配合
+- 所有更新是增量的：`make_move`/`unmake_move` 仅修改涉及到的字段
+- Zobrist 键通过异或运算增量更新
+- NNUE/MNUE-P2 累加器存储在 Position 中，走法执行时自动增量更新
+- `StateInfo` 栈支持完整的走法撤销
 - 支持 FEN 字符串解析和导出
 
 ---
@@ -67,61 +123,43 @@
 ## English
 
 ### Overview
-`Position.cpp` implements the board state representation and operations for the MagnusChess engine. It uses a hybrid architecture combining mailbox arrays, bitboards, incremental evaluation, and Zobrist hashing, supporting full move execution and undo.
+`Position.cpp` implements the board state representation and operations for the MagnusChess engine. It uses a hybrid architecture combining mailbox arrays, bitboards, incremental evaluation, Zobrist hashing, and NNUE/MNUE accumulators.
 
-### Core Architecture
+### Position Struct Core Fields
 
-#### Data Structures
+Key fields include: `side_to_move`, `ep_sq`, `castling_rights`, `halfmove_clock`, `fullmove_number`, `king_sq[COLOR_NB]`, `color_bb[COLOR_NB]`, `piece_bb[PIECE_NB]`, `occupied`, `piece_counts`, `non_king_material`, `material_signature`, `eval_mg[COLOR_NB]`/`eval_eg[COLOR_NB]`, `eval_phase`, `key`, `board[SQ_NB]`.
 
-The `Position` struct contains the following core members:
+NNUE accumulators: `nnue_generation`, `nnue_acc_valid`, `nnue_acc[COLOR_NB][128]` (alignas(64)).
 
-- **Mailbox array** `board[64]` — O(1) piece lookup by square index
-- **Bitboards** `piece_bb[PIECE_NB]` — One bitboard per piece type for efficient batch operations
-- **Color bitboards** `color_bb[COLOR_NB]` — White/black occupancy sets
-- **Total occupancy** `occupied` — Union of all pieces
-- **Incremental evaluation** `psqt_score` — Accumulated midgame/endgame PSQT values
-- **Phase value** `phase` — For midgame/endgame score interpolation
-- **Zobrist key** `state_key` — Complete board hash
-- **pawn_key** — Pawn-only hash, used for pawn structure history
-- **material_key** — Material configuration hash, used for material table
-- **StateInfo stack** — Stores `captured_piece`, `en_passant`, `castling_rights`, `rule50`, `prev_key`, `prev_psqt`, and other incremental rollback information
+MNUE-P2 accumulators: `mnue_p2_generation`, `mnue_p2_acc_valid_mask`, `mnue_p2_acc[COLOR_NB][1024]` (alignas(64)).
 
-#### Move Execution Flow
+### StateInfo Struct
 
-**`make_move()`**:
-1. Save current state onto the `StateInfo` stack
-2. Update moving piece: remove from `from`, place on `to`
-3. Update incremental PSQT scores and phase value
-4. Update Zobrist key (pieces, castling rights, en passant, side-to-move)
-5. Handle special moves:
-   - **Capture**: Remove captured piece, update PSQT/phase/key
-   - **Double pawn push**: Set en passant target square
-   - **Castling**: Move rook simultaneously
-   - **Promotion**: Replace pawn with new piece type
-   - **En passant**: Remove the captured pawn
-6. Update castling rights, rule50 counter, toggle side to move
+Move undo information stored on the `make_move`/`unmake_move` stack: castling rights, ep square, halfmove clock, fullmove number, key, captured piece, captured square.
 
-**`unmake_move()`**:
-1. Pop saved state from `StateInfo` stack
-2. Restore all modified fields (board, piece_bb, color_bb, occupied, key, psqt, phase, etc.)
+### Convenience Accessors
 
-**`do_move_copy()`** — Creates a copy and executes the move, used for perft verification without modifying the original board.
+`us`, `them`, `pieces`, `pieces_of_type`, `piece_count`, `non_king_material`, `packed_material_signature`, `king_square`, `has_ep`, `piece_on`, `color_on`, `piece_type_on`, `empty_on`, `occupied_on`.
 
-#### Helper Functions
+### Move Execution
 
-| Function | Description |
-|----------|-------------|
-| `position_put_piece()` | Place a piece on a square, update bitboards and evaluation |
-| `position_remove_piece()` | Remove a piece |
-| `position_move_piece()` | Move a piece (atomic from→to) |
-| `set_start_position()` | Set up the standard chess starting position |
-| `piece_type_on()` | Query piece type on a square |
-| `pieces()` | Get bitboard of a color/piece type combination |
-| `is_draw()` | Check for draw (50-move rule / repetition) |
-| `has_non_pawn_material()` | Check if a side has non-pawn material |
-| `see_ge()` | Delegate to See.cpp for SEE evaluation |
+`make_move`, `unmake_move`, `do_move_copy`.
+
+### Position Operations
+
+`position_clear`, `position_put_piece`, `position_remove_piece`, `position_move_piece`, `position_recompute_occupied`, `position_refresh_king_squares`, `position_compute_key`, `position_refresh_key`.
+
+### Validation
+
+`position_has_valid_kings`, `position_board_matches_bitboards`.
+
+### Move Legality
+
+`legal`, `pseudo_legal_fast`.
 
 ### Design Notes
 - All updates are incremental; `make_move`/`unmake_move` only modifies affected fields
-- Zobrist key is updated incrementally via XOR operations, working with random number tables generated by `tables_init_zobrist()`
+- Zobrist key is updated incrementally via XOR
+- NNUE/MNUE-P2 accumulators stored in Position, auto-updated during move execution
+- `StateInfo` stack supports full move undo
 - Supports FEN string parsing and export

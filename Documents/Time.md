@@ -3,165 +3,127 @@
 ## 中文
 
 ### 概述
-`Time.cpp` 实现了 MagnusChess 引擎的**时间管理**系统。它解析 UCI `go` 命令的时间参数，使用 Stockfish 风格的动态时间分配公式，为每次搜索计算最优的软/硬时间限制。
+`Time.cpp` 实现了 MagnusChess 引擎的**时间管理**系统。它通过 `TimeManager` 类解析 UCI `go` 命令的时间参数，使用 Stockfish 风格的动态时间分配公式，并结合搜索历史自适应调整时间预算。
 
-### 核心架构
+### 命名空间
+所有类型和函数位于 `namespace magnus::timeman`。
 
-#### 搜索限制结构（`SearchLimits`）
+### 核心类型
 
-```cpp
-struct SearchLimits {
-    int64_t time[COLOR_NB];     // 各方剩余时间 (ms)
-    int64_t inc[COLOR_NB];      // 各方增量 (ms)
-    int movestogo;              // 到时间控制的剩余步数
-    int depth;                  // 固定深度（0 = 无限制）
-    int64_t movetime;           // 固定搜索时间
-    int64_t nodes;              // 固定节点数
-    int mate;                   // 杀棋搜索深度
-    bool infinite;              // 无限模式
-    bool ponder;                // 长考模式
+#### GoParams — UCI 时间参数
 
-    // 计算所得的限制
-    TimePoint soft_limit;       // 软时间限制
-    TimePoint hard_limit;       // 硬时间限制
-};
-```
+| 字段 | 类型 | 默认 | 描述 |
+|------|------|------|------|
+| `depth` | int | 0 | 固定深度（go depth N） |
+| `nodes` | u64 | 0 | 固定节点数（go nodes N） |
+| `movetime` | int | 0 | 固定时间（go movetime N） |
+| `wtime` | int | 0 | 白方剩余时间 ms |
+| `btime` | int | 0 | 黑方剩余时间 ms |
+| `winc` | int | 0 | 白方增量 ms |
+| `binc` | int | 0 | 黑方增量 ms |
+| `movestogo` | int | 0 | 剩余步数（0=未知） |
+| `ponder` | bool | false | 沉思模式 |
+| `infinite` | bool | false | 无限搜索 |
 
-#### 时间分配流程（`build_limits()`）
+#### TimeManager 类
 
-```
-1. 解析 UCI go 参数
-2. 如果指定了 movetime/depth/nodes → 固定限制
-3. 否则：
-   a. 计算可用时间 = time[side] + inc[side] - move_overhead
-   b. 根据 movestogo 或默认预估步数分摊时间
-   c. 软限制 = 可用时间 × scale_factor（通常 0.5-0.75）
-   d. 硬限制 = 可用时间 × max_factor（通常 1.5-2.5）
-```
-
-#### Stockfire 风格分配公式
-
-**剩余步数估计**：
-- 如果指定了 `movestogo`，直接使用
-- 否则，根据历史平均步数和时间控制估算
-
-**基本分配**：
-```
-opt_time = (剩留时间) / (剩余步数) + 增量
-soft_limit = opt_time × soft_factor
-hard_limit = opt_time × hard_factor
-max_time = min(opt_time × max_factor, 剩留时间)
-```
-
-#### 历史追踪（`record_search()`）
-
-跟踪最近的搜索时间使用情况，用于自适应调整：
-- 记录每次搜索的实际用时
-- 根据历史模式预测当前搜索的合理时间
-- 当引擎频繁超时时调整分配比例
-
-#### 紧急时间扩展
-
-在以下情况扩展时间预算：
-- 最佳走法发生变化（PV 变化）
-- 分数在下降
-- 时间充裕且局面尚不明朗
-
-### 关键函数
-
-| 函数 | 描述 |
+| 方法 | 描述 |
 |------|------|
-| `build_limits()` | 从 UCI 参数构建搜索限制 |
-| `record_search()` | 记录搜索历史以调整未来分配 |
-| `elapsed()` | 返回搜索已过的时间 |
-| `should_stop()` | 基于限制判断是否应停止搜索 |
+| `new_game()` | 清空历史，开始新对局 |
+| `build_limits(pos, params, limits)` | 从 GoParams 构建 SearchLimits（返回 false=参数无效） |
+| `record_search(root, limits, result, elapsed_ms)` | 记录搜索结果到历史（用于自适应） |
+| `history_size()` | 当前历史记录数 |
+
+#### 内部类型
+
+| 类型 | 描述 |
+|------|------|
+| `SearchRecord` | 单次搜索记录：side, fullmove_number, soft/hard time, elapsed, depth, score_cp, best_move |
+| `HistoryStats` | 历史统计：samples, avg_usage_pct, avg_score_swing_cp, best_move_flip_pct |
+
+### 时间分配流程
+
+1. 解析 `GoParams`
+2. 如果指定了 `movetime`/`depth`/`nodes` → 固定限制
+3. 否则：
+   - 计算可用时间 = `time[side] + inc[side] - overhead`
+   - 根据 `movestogo` 或历史预估步数分摊
+   - 软限制 = 可用时间 × scale_factor
+   - 硬限制 = 可用时间 × max_factor
+
+### 历史自适应
+
+`TimeManager` 维护最近 **64 次**搜索的环形缓冲区，统计：
+- 平均时间使用率
+- 平均分数摆动
+- 最佳走法变更频率
+
+若最佳走法频繁变更 → 分配更多时间；若局势稳定 → 提早停止。
+
+### 搜索限制（SearchLimits，定义在 Search.h）
+
+由 `TimeManager::build_limits()` 填充的关键时间字段：
+- `soft_time_ms` — 软时间限制（最佳停止点）
+- `hard_time_ms` — 硬时间限制（绝对上限）
+- `use_time_management` — 是否启用时间管理
 
 ### 设计要点
-- 动态分配策略避免了固定时间均分的粗暴方式
-- 历史追踪实现了经验驱动的自适应时间管理
+- 动态分配策略避免固定时间均分的粗暴方式
+- 64 条历史记录实现经验驱动的自适应
 - 软限制用于"考虑停止"，硬限制用于强制停止
-- 移动开销补偿（MoveOverhead）防止通信延迟导致的超时
+- 与 UCI `go` 和 `ponderhit` 命令紧密集成
 
 ---
 
 ## English
 
 ### Overview
-`Time.cpp` implements the **time management** system for the MagnusChess engine. It parses time parameters from UCI `go` commands, uses a Stockfish-style dynamic time allocation formula, and computes optimal soft/hard time limits for each search.
+`Time.cpp` implements the **time management** system for the MagnusChess engine. It uses the `TimeManager` class to parse UCI `go` command time parameters, applies a Stockfish-style dynamic time allocation formula, and adaptively adjusts time budgets using search history.
 
-### Core Architecture
+### Namespace
+All types and functions reside in `namespace magnus::timeman`.
 
-#### Search Limits Structure (`SearchLimits`)
+### Core Types
 
-```cpp
-struct SearchLimits {
-    int64_t time[COLOR_NB];     // Remaining time per side (ms)
-    int64_t inc[COLOR_NB];      // Increment per side (ms)
-    int movestogo;              // Moves remaining to time control
-    int depth;                  // Fixed depth (0 = no limit)
-    int64_t movetime;           // Fixed search time
-    int64_t nodes;              // Fixed node count
-    int mate;                   // Mate search depth
-    bool infinite;              // Infinite mode
-    bool ponder;                // Ponder mode
+#### GoParams — UCI Time Parameters
 
-    // Computed limits
-    TimePoint soft_limit;       // Soft time limit
-    TimePoint hard_limit;       // Hard time limit
-};
-```
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `depth` | int | 0 | Fixed depth |
+| `nodes` | u64 | 0 | Fixed node count |
+| `movetime` | int | 0 | Fixed time (ms) |
+| `wtime`/`btime` | int | 0 | White/Black remaining time (ms) |
+| `winc`/`binc` | int | 0 | White/Black increment (ms) |
+| `movestogo` | int | 0 | Moves to time control (0=unknown) |
+| `ponder` | bool | false | Ponder mode |
+| `infinite` | bool | false | Infinite search |
 
-#### Time Allocation Flow (`build_limits()`)
+#### TimeManager Class
 
-```
-1. Parse UCI go parameters
-2. If movetime/depth/nodes specified → fixed limits
-3. Otherwise:
-   a. Compute available time = time[side] + inc[side] - move_overhead
-   b. Amortize time based on movestogo or default estimated move count
-   c. Soft limit = available × scale_factor (typically 0.5-0.75)
-   d. Hard limit = available × max_factor (typically 1.5-2.5)
-```
+| Method | Description |
+|--------|-------------|
+| `new_game()` | Clear history for new game |
+| `build_limits(pos, params, limits)` | Build SearchLimits from GoParams |
+| `record_search(root, limits, result, elapsed_ms)` | Record search result for adaptive tuning |
+| `history_size()` | Current history count |
 
-#### Stockfish-Style Allocation Formula
+### Internals
 
-**Remaining moves estimation**:
-- If `movestogo` is specified, use it directly
-- Otherwise, estimate based on historical average moves and time control
+`SearchRecord` — per-search record (side, time, depth, score, best move).
+`HistoryStats` — aggregated stats (usage %, score swing, best move flip rate).
 
-**Basic allocation**:
-```
-opt_time = (remaining_time) / (moves_remaining) + increment
-soft_limit = opt_time × soft_factor
-hard_limit = opt_time × hard_factor
-max_time = min(opt_time × max_factor, remaining_time)
-```
+### Time Allocation Flow
 
-#### History Tracking (`record_search()`)
+1. Parse `GoParams`
+2. If fixed limits specified → use directly
+3. Otherwise: compute available time, amortize by estimated remaining moves, compute soft/hard limits.
 
-Tracks recent search time usage for adaptive adjustment:
-- Records actual time used per search
-- Predicts reasonable time for current search based on historical patterns
-- Adjusts allocation ratios when the engine frequently overruns time
+### History Adaptation
 
-#### Emergency Time Extension
-
-Extends the time budget when:
-- Best move changes (PV change)
-- Score is dropping
-- Time is ample and position is unclear
-
-### Key Functions
-
-| Function | Description |
-|----------|-------------|
-| `build_limits()` | Build search limits from UCI parameters |
-| `record_search()` | Record search history for future allocation adjustment |
-| `elapsed()` | Return elapsed search time |
-| `should_stop()` | Determine whether to stop based on limits |
+64-entry ring buffer tracking: average time usage, score swing, best move flip rate. Unstable best moves → more time; stable positions → stop earlier.
 
 ### Design Notes
-- Dynamic allocation avoids the crude approach of equal time division
-- History tracking enables empirically-driven adaptive time management
-- Soft limit for "consider stopping," hard limit for forced stop
-- Move overhead compensation (MoveOverhead) prevents timeouts from communication latency
+- Dynamic allocation avoids crude equal time division
+- 64-entry history enables empirically-driven adaptation
+- Soft limit = "consider stopping", hard limit = forced stop
+- Tightly integrated with UCI `go` and `ponderhit` commands

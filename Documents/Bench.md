@@ -3,139 +3,115 @@
 ## 中文
 
 ### 概述
-`Bench.cpp` 实现了 MagnusChess 引擎的**基准测试（Benchmark）** 系统。通过在一组预定义的国际象棋局面上运行固定深度或固定时间的搜索，量化引擎的搜索速度和性能。
+`Bench.cpp` 实现了 MagnusChess 引擎的**基准测试（Benchmark）**系统。通过在一组预定义局面上运行固定深度或固定时间的搜索，量化引擎的搜索速度和性能。同时集成了 perft 验证和走法生成速度测试。
 
-### 核心架构
+### BenchConfig 配置结构
 
-#### 测试局面集
+| 字段 | 类型 | 默认 | 描述 |
+|------|------|------|------|
+| `perft_depth` | int | 10 | Perft 深度 |
+| `search_depth` | int | 6 | 搜索基准深度 |
+| `search_movetime_ms` | int | 1000 | 搜索基准时间（ms） |
+| `eval_iterations` | int | 20000 | 评估基准迭代次数 |
+| `hash_mb` | size_t | 16 | 置换表大小（MB） |
+| `threads` | size_t | 1 | 线程数 |
+| `divide` | bool | false | Perft divide 模式 |
+| `evalbench` | bool | false | 评估速度基准 |
+| `search` | bool | false | 搜索基准模式 |
+| `timed_search` | bool | false | 定时搜索基准模式 |
+| `live_divide` | bool | false | 实时 divide 输出 |
 
-基准测试使用 **13 个标准 FEN 局面**，涵盖各种国际象棋阶段和特征：
-- 开局、中局、残局
-- 封闭/开放局面
-- 对称/不平衡子力
-- 包含将杀威胁和战术机会的局面
+### 核心函数
 
-这些局面来自 Stockfish 的 benchmark 集，确保同类引擎间的可比性。
-
-#### 基准测试模式
-
-| 模式 | 函数 | 描述 |
+| 函数 | 签名 | 描述 |
 |------|------|------|
-| 固定深度 | `run_search_bench()` | 对每个局面搜索固定深度，统计节点和时间 |
-| 固定时间 | `run_timed_search_bench()` | 对每个局面搜索固定时间 |
-| Perft | `benchmark_perft()` | 走法生成性能测试 |
+| `set_start_position(pos)` | `(Position& pos)` | 设置标准初始局面 |
+| `benchmark_perft(pos, mem, depth, threads)` | → `PerftBenchResult` | Perft 性能基准 |
+| `run_search_bench(mem, depth, threads, use_nnue, emit_ponder, out)` | → `bool` | 固定深度搜索基准 |
+| `run_timed_search_bench(mem, movetime_ms, threads, use_nnue, emit_ponder, out)` | → `bool` | 固定时间搜索基准 |
+| `parse_config(argc, argv)` | → `BenchConfig` | 解析 CLI 参数 |
+| `run_bench(argc, argv)` | → `int` | 基准测试入口（main 调用） |
 
-#### 配置解析（`parse_config()`）
+### PerftBenchResult
 
-从 CLI 参数解析基准测试参数：
-```
-magnus bench [depth <d>] [time <ms>] [threads <n>] [hash <mb>]
-```
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `depth` | int | Perft 深度 |
+| `nodes` | NodeCount (u64) | 总节点数 |
+| `seconds` | double | 耗时（秒） |
+| `nps` | double | 每秒节点数 |
+| `threads` | size_t | 使用线程数 |
 
-### 搜索基准测试流程（`run_search_bench()`）
+### 基准测试模式
 
-```
-对每个测试局面:
-    1. set_start_position(FEN)
-    2. 初始化搜索限制
-    3. 运行 iterative_deepening()
-    4. 收集 <nodes, time, nps>
-总计:
-    输出: "Total: <total_nodes> nodes <total_time> ms <total_nps> nps"
-```
+| 模式 | 触发条件 | 描述 |
+|------|---------|------|
+| Perft | `BenchConfig::perft_depth > 0` | 走法生成正确性+速度验证 |
+| 搜索基准 | `BenchConfig::search == true` | 固定深度搜索计时 |
+| 定时搜索 | `BenchConfig::timed_search == true` | 固定时间搜索计时 |
+| 评估基准 | `BenchConfig::evalbench == true` | 评估函数速度测试 |
+| Divide | `BenchConfig::divide == true` | 分行 perft 输出 |
 
-### 关键函数
-
-| 函数 | 描述 |
-|------|------|
-| `run_search_bench()` | 固定深度搜索基准测试 |
-| `run_timed_search_bench()` | 固定时间搜索基准测试 |
-| `benchmark_perft()` | Perft 性能测试包装器 |
-| `parse_config()` | 解析 CLI 参数 |
-| `set_start_position()` | 设置基准测试局面 |
-
-### 输出格式
+### CLI 用法
 
 ```
-Position 1/13: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
-Nodes: 1234567, Time: 1234 ms, NPS: 1000456
-...
-Total: 16000000 nodes 16000 ms 1000000 nps
+magnus bench [options]
 ```
+
+选项由 `parse_config(argc, argv)` 解析。具体参数格式参见 `main()` 调用 `run_bench(argc, argv)`。
 
 ### 设计要点
-- 13 个局面覆盖完整的棋局多样性
-- 支持单线程和多线程模式
-- 与 UCI 前端集成，可通过 `bench` 命令交互调用
-- NPS 计算为速度和扩展性的客观度量
+- 支持单线程和多线程基准模式
+- `set_start_position()` 仅设置初始局面（不接受 FEN 参数）
+- Perft 结果通过 `PerftBenchResult` 结构体返回（含 nps）
+- 评估基准 (`evalbench`) 用于测量 HCE/NNUE 的纯评估速度
 
 ---
 
 ## English
 
 ### Overview
-`Bench.cpp` implements the **benchmark** system for the MagnusChess engine. By running fixed-depth or fixed-time searches on a set of predefined chess positions, it quantifies the engine's search speed and performance.
+`Bench.cpp` implements the **benchmark** system for the MagnusChess engine. It quantifies search speed and performance by running fixed-depth or fixed-time searches on a set of predefined positions, and also integrates perft verification and move generation speed testing.
 
-### Core Architecture
+### BenchConfig
 
-#### Test Position Set
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `perft_depth` | int | 10 | Perft depth |
+| `search_depth` | int | 6 | Search bench depth |
+| `search_movetime_ms` | int | 1000 | Search bench time (ms) |
+| `eval_iterations` | int | 20000 | Eval bench iterations |
+| `hash_mb` | size_t | 16 | TT size (MB) |
+| `threads` | size_t | 1 | Thread count |
+| `divide` | bool | false | Perft divide mode |
+| `evalbench` | bool | false | Eval speed benchmark |
+| `search` | bool | false | Search benchmark mode |
+| `timed_search` | bool | false | Timed search benchmark |
+| `live_divide` | bool | false | Live divide output |
 
-The benchmark uses **13 standard FEN positions** covering various chess phases and characteristics:
-- Openings, middlegames, endgames
-- Closed/open positions
-- Symmetric/imbalanced material
-- Positions with mating threats and tactical opportunities
+### Core Functions
 
-These positions come from Stockfish's benchmark set, ensuring comparability between similar engines.
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `set_start_position(pos)` | `(Position& pos)` | Set starting position |
+| `benchmark_perft(pos, mem, depth, threads)` | → `PerftBenchResult` | Perft benchmark |
+| `run_search_bench(mem, depth, threads, use_nnue, emit_ponder, out)` | → `bool` | Fixed-depth search bench |
+| `run_timed_search_bench(mem, movetime_ms, threads, use_nnue, emit_ponder, out)` | → `bool` | Fixed-time search bench |
+| `parse_config(argc, argv)` | → `BenchConfig` | Parse CLI args |
+| `run_bench(argc, argv)` | → `int` | Benchmark entry (called by main) |
 
-#### Benchmark Modes
+### Benchmark Modes
 
-| Mode | Function | Description |
-|------|----------|-------------|
-| Fixed depth | `run_search_bench()` | Search each position to a fixed depth, tracking nodes and time |
-| Fixed time | `run_timed_search_bench()` | Search each position for a fixed duration |
-| Perft | `benchmark_perft()` | Move generation performance testing |
-
-#### Configuration Parsing (`parse_config()`)
-
-Parses benchmark parameters from CLI arguments:
-```
-magnus bench [depth <d>] [time <ms>] [threads <n>] [hash <mb>]
-```
-
-### Search Benchmark Flow (`run_search_bench()`)
-
-```
-For each test position:
-    1. set_start_position(FEN)
-    2. Initialize search limits
-    3. Run iterative_deepening()
-    4. Collect <nodes, time, nps>
-Total:
-    Output: "Total: <total_nodes> nodes <total_time> ms <total_nps> nps"
-```
-
-### Key Functions
-
-| Function | Description |
-|----------|-------------|
-| `run_search_bench()` | Fixed-depth search benchmark |
-| `run_timed_search_bench()` | Fixed-time search benchmark |
-| `benchmark_perft()` | Perft performance test wrapper |
-| `parse_config()` | Parse CLI arguments |
-| `set_start_position()` | Set up benchmark position |
-
-### Output Format
-
-```
-Position 1/13: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
-Nodes: 1234567, Time: 1234 ms, NPS: 1000456
-...
-Total: 16000000 nodes 16000 ms 1000000 nps
-```
+| Mode | Trigger | Description |
+|------|---------|-------------|
+| Perft | `perft_depth > 0` | Move gen correctness + speed |
+| Search | `search == true` | Fixed-depth search timing |
+| Timed search | `timed_search == true` | Fixed-time search timing |
+| Eval | `evalbench == true` | Eval function speed test |
+| Divide | `divide == true` | Per-line perft output |
 
 ### Design Notes
-- 13 positions cover complete chess diversity
-- Supports both single-threaded and multi-threaded modes
-- Integrated with UCI frontend, invocable interactively via `bench` command
-- NPS calculation serves as an objective measure of speed and scalability
+- Supports single and multi-threaded benchmark modes
+- `set_start_position()` only sets the initial position (no FEN parameter)
+- Perft results returned via `PerftBenchResult` struct (includes nps)
+- Eval benchmark (`evalbench`) measures pure HCE/NNUE evaluation speed

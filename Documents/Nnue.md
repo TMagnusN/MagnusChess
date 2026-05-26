@@ -1,193 +1,331 @@
-# Nnue.cpp - 神经网络评估 / NNUE Evaluation
+# Nnue.cpp / Mnue.cpp - 神经网络评估 / NNUE Evaluation
 
 ## 中文
 
 ### 概述
-`Nnue.cpp` 实现了 MagnusChess 引擎的 **NNUE（Efficiently Updatable Neural Network）** 评估函数。NNUE 是一种高度优化的神经网络架构，专为国际象棋引擎设计，能在 CPU 上实现极快的增量评估。
+MagnusChess 包含**两套**神经网络评估系统：
+
+1. **NNUE (Chess768)** — 传统 NNUE 架构，768→128→1，`src/Nnue.cpp`
+2. **MNUE-P2/P4** — 新一代双网络架构，P2 快速过滤 + P4 精确精炼，`src/Mnue.cpp`
+
+两套系统共享 `Position` 中的增量累加器，通过钩子函数在 `make_move`/`unmake_move` 时自动更新。
+
+---
+
+## NNUE (Chess768) — `namespace magnus::nnue`
 
 ### 网络架构
 
-#### Chess768 输入方案
-
-NNUE 网络使用 **"Chess768"** 输入布局：
-- 输入维度：**768** = (2 色 × 6 种类 + 1 空) × 64 格… 实际为 2 视角 × (6 种棋子 × 64) = 768
-- **双视角**：同时编码己方视角和对方视角的棋子布局
-
-#### 网络层结构
 ```
 输入层:   768 neurons (双视角棋盘编码)
 隐藏层:   128 neurons (全连接 + 量化激活)
-输出层:   1 scalar (评估值，以 CP 为单位)
+输出层:   1 scalar (原始评估值，非 cp)
 ```
 
-- `kInputSize = 768`
-- `kHiddenSize = 128`
+- `kInputSize = 768` = 2 视角 × 6 棋子类型 × 64 格
+- `kHiddenSize = 128`（必须为 16 的倍数以支持 AVX2）
 - `kActivationClip = 255`（ScreLU 截断阈值）
 
 #### 激活函数：ScreLU
 
-网络使用 **ScreLU (Squared Clipped ReLU)**：
 ```
 ScreLU(x) = clamp(x, 0, 255)²
 ```
-这是一种在 NNUE 中广泛使用的激活函数，结合了 ReLU 的非线性和平方的分布展宽。
 
-### 增量更新原理
+### 增量更新
 
-NNUE 的核心优势在于**高效增量更新（Efficiently Updatable）**：
+`Position` 结构体为双方各维护一个累加器（`nnue_acc[COLOR_NB][kHiddenSize]`），通过以下钩子在走法执行/撤销时增量更新：
 
-1. 每次走法只改变棋盘上 1-3 个位置（from/to/吃子）
-2. 只更新与这些位置相关的特征
-3. 不需要整个网络重新前向传播
-4. 使用 **feature delta refresh** 快速更新输入层激活
+- `on_piece_added(pos, color, pt, sq)` — 添加棋子
+- `on_piece_removed(pos, color, pt, sq)` — 移除棋子
+- `on_piece_moved(pos, color, pt, from, to)` — 移动棋子
 
-### 核心组件
+### 分数转换链
 
-#### 网络加载
+| 函数 | 输入 | 输出 | 描述 |
+|------|------|------|------|
+| `eval(pos)` | Position | int | 原始 NNUE 输出 |
+| `search_score(v, pos)` | 原始值 | int | 转为搜索内部分数 |
+| `search_score_to_cp(score, pos)` | 搜索分 | int | 转为 UCI 厘兵显示 |
+| `search_score_to_wdl(score, pos)` | 搜索分 | WdlTriplet | 转为胜率和三元组 |
+| `search_score_to_winrate(score, pos)` | 搜索分 | int | 转为胜率 (0-1000) |
+| `win_rate_params(pos)` | Position | WinRateParams | Sigmoid 参数 (a=中心, b=斜率) |
+| `win_rate_model(v, pos)` | 原始值 | int | 直接转胜率 |
 
-支持两种格式：
-| 格式 | 扩展名 | 描述 |
-|------|--------|------|
-| 原生格式 | `.nnue` | MagnusChess 自有网络格式 |
-| Bullet 量化 | `.bin` | 量化网络格式，`NetworkFileQuantized` |
-
-`NnueNetwork` 结构体存储所有权重和偏置，通过 `load_nnue_network()` 加载。
-
-#### 前向传播（`forward()`）
-
-传入特征索引集，计算最终评估：
-1. 输入层：遍历有效特征索引，累加对应权重（增量）
-2. 隐藏层：`ScreLU(input_hidden × weights + bias)`
-3. 输出层：`hidden_output × output_weights + output_bias`
-
-#### AVX2 SIMD 加速
-
-关键计算路径使用 **AVX2** 指令集加速：
-- 256 位向量化权重累加
-- `_mm256_add_epi16`、`_mm256_madd_epi16` 等 SIMD 指令
-- 并行处理 16 个 16 位元素
-
-#### 分数转换
+### 网络生命周期
 
 | 函数 | 描述 |
 |------|------|
-| `cp_to_wdl()` | CP（centipawn）→ 胜率和（WDL） |
-| `wdl_to_cp()` | 胜率和 → CP |
-| `winrate_to_cp()` | 胜率 → CP |
+| `load(path)` | 从文件加载网络（支持 .nnue 和 .bin 格式） |
+| `unload()` | 卸载当前网络 |
+| `loaded()` | 网络是否已加载 |
+| `path()` | 当前加载的文件路径 |
+| `description()` | 网络架构描述字符串 |
+| `last_error()` | 最后一次错误信息 |
 
-### 关键函数
+### 网络文件格式
 
-| 函数 | 描述 |
-|------|------|
-| `load_nnue_network()` | 从文件加载 NNUE 网络 |
-| `forward()` | 执行 NNUE 前向传播 |
-| `nnue_evaluate()` | 完整 NNUE 评估（特征提取 + 前向） |
-| `init_nnue()` | 初始化 NNUE 系统 |
-| `refresh_features()` | 增量更新输入特征 |
+- **原生 .nnue** — Magnus 自有格式，含标头
+- **Bullet .bin** — Rust simple.rs 量化格式，无标头
 
-### 与手写评估的集成
+### AVX2 SIMD 加速
+
+关键计算路径使用 AVX2 指令集：
+- 256 位向量化权重累加（每次处理 16 个隐藏神经元，128/16 = 8 轮）
+- 累加器对齐到 64 字节以支持 SIMD 加载
+
+---
+
+## MNUE-P2/P4 — `namespace magnus::mnue`
+
+### 架构概述
+
+MNUE 采用**双网络级联**架构：
+
+| 网络 | 结构 | Hidden | 用途 |
+|------|------|--------|------|
+| **P2** (Filter) | 10240 → 1024 → 1 | 1024 | 快速基础评估，用于大部分搜索节点 |
+| **P4** (Refine) | 20480 → 5120 → 1 | 5120 | 精确精炼评估，仅用于选定搜索节点 |
+
+P4 是有意惰性的：在第一阶段集成中不写入 TT 的原始 eval。
+
+### P2 网络详细规格
 
 ```
-评估选择逻辑：
-if (NNUE 可用且 position.count >= threshold):
-    eval = nnue_evaluate(pos, mem)
+输入: 10240 特征 = 16 input_buckets × 2 colors × 5 non-king piece types × 64 squares
+隐藏: 1024 neurons (i16)
+架构 ID: 2
+```
+
+P2 使用**持久增量累加器**：`Position::mnue_p2_acc[COLOR_NB][1024]`，在 `make_move`/`unmake_move` 时自动更新。
+
+### P4 网络详细规格
+
+```
+输入: 20480 特征 = 32 input_buckets × 2 colors × 5 non-king piece types × 64 squares
+隐藏: 5120 neurons (i16)
+架构 ID: 4
+```
+
+P4 使用**惰性重建**：不维护增量累加器，每次评估时从零重建。
+
+### P2/P4 生命周期
+
+| 函数 | 描述 |
+|------|------|
+| `load_p2(path)` / `load_p4(path)` | 加载 P2/P4 网络 |
+| `unload_p2()` / `unload_p4()` / `unload_all()` | 卸载网络 |
+| `p2_loaded()` / `p4_loaded()` | 检查加载状态 |
+| `p2_path()` / `p4_path()` | 当前文件路径 |
+| `last_error()` | 最后一次错误信息 |
+
+### P2/P4 评估
+
+| 函数 | 描述 |
+|------|------|
+| `eval_p2(pos)` | P2 基础评估（热路径，使用增量累加器） |
+| `eval_p4_lazy(pos)` | P4 惰性评估（冷路径，每次重建） |
+| `debug_eval_p2_reference(pos)` | P2 参考评估（完整重建，用于验证增量正确性） |
+| `debug_check_p2_incremental(pos, out)` | 验证 P2 增量累加器 vs 完整重建 |
+
+### MNUE 分数转换
+
+MNUE 模块复用 `nnue::WinRateParams` 和 `nnue::WdlTriplet` 类型，提供自己的转换函数：
+
+| 函数 | 描述 |
+|------|------|
+| `search_score(v, pos)` | 原始值 → 搜索分 |
+| `to_cp(v, pos)` | 原始值 → 厘兵 |
+| `material_units(pos)` | 当前局面的子力单位 |
+| `win_rate_params(pos)` | Sigmoid 参数 |
+| `win_rate_model(v, pos)` | 原始值 → 胜率 |
+| `search_score_to_cp(score, pos)` | 搜索分 → 厘兵 |
+| `search_score_to_winrate(score, pos)` | 搜索分 → 胜率 |
+| `search_score_to_wdl(score, pos)` | 搜索分 → 胜率和三元组 |
+
+### MNUE 增量钩子
+
+与 NNUE 相同接口，由 Position 的走法执行/撤销调用：
+
+- `on_position_cleared(pos)` — 清空局面
+- `on_piece_added(pos, color, pt, sq)` — 添加棋子
+- `on_piece_removed(pos, color, pt, sq)` — 移除棋子
+- `on_piece_moved(pos, color, pt, from, to)` — 移动棋子
+
+### 调试工具
+
+- `debug_dump_p2_features(pos, out)` — UCI 命令 `mnuedebug` 的实现，打印 P2 输入桶、活跃特征索引、输出桶和原始 P2 评估值
+- `p2_i32_forward_enabled()` — 是否启用 i32 前向传播
+- `p2_w1_max_abs()` — 输出权重最大绝对值
+
+### 评估选择逻辑（概念）
+
+```
+if (P2 已加载):
+    eval = eval_p2(pos)
+    if (需要精确评估 且 P4 已加载):
+        eval = eval_p4_lazy(pos)
+else if (NNUE 已加载):
+    eval = nnue::eval(pos)
 else:
-    eval = evaluate(pos, mem)  // HCE 回退
+    eval = eval::evaluate(pos)  // HCE 回退
 ```
+
+### 设计要点
+- P2 使用持久增量累加器（O(隐藏层) 更新而非 O(输入×隐藏层)），适合搜索热路径
+- P4 采用惰性重建策略，仅在关键节点（如根节点、PV 节点）使用
+- 双网络架构允许在速度和精度之间灵活权衡
+- 增量累加器通过 `debug_check_p2_incremental()` 验证正确性
+- 训练器/引擎特征索引对齐通过 `debug_dump_p2_features()` 验证
 
 ---
 
 ## English
 
 ### Overview
-`Nnue.cpp` implements the **NNUE (Efficiently Updatable Neural Network)** evaluation function for the MagnusChess engine. NNUE is a highly optimized neural network architecture designed for chess engines, capable of extremely fast incremental evaluation on CPU.
+MagnusChess includes **two** neural network evaluation systems:
+
+1. **NNUE (Chess768)** — Traditional NNUE architecture, 768→128→1, `src/Nnue.cpp`
+2. **MNUE-P2/P4** — Next-gen dual-network architecture, P2 fast filter + P4 precision refine, `src/Mnue.cpp`
+
+Both share incremental accumulators in `Position`, updated automatically via hooks during `make_move`/`unmake_move`.
+
+---
+
+## NNUE (Chess768) — `namespace magnus::nnue`
 
 ### Network Architecture
 
-#### Chess768 Input Scheme
-
-The NNUE network uses the **"Chess768"** input layout:
-- Input dimension: **768** = 2 perspectives × (6 piece types × 64 squares) = 768
-- **Dual perspective**: Simultaneously encodes piece placement from own and opponent views
-
-#### Network Layer Structure
 ```
-Input layer:   768 neurons (dual-perspective board encoding)
-Hidden layer:  128 neurons (fully connected + quantized activation)
-Output layer:  1 scalar (evaluation in centipawns)
+Input:   768 neurons (dual-perspective board encoding)
+Hidden:  128 neurons (fully connected + quantized activation)
+Output:  1 scalar (raw eval, not centipawns)
 ```
 
-- `kInputSize = 768`
-- `kHiddenSize = 128`
+- `kInputSize = 768` = 2 perspectives × 6 piece types × 64 squares
+- `kHiddenSize = 128` (must be multiple of 16 for AVX2)
 - `kActivationClip = 255` (ScreLU clamp threshold)
 
-#### Activation Function: ScreLU
+#### Activation: ScreLU
 
-The network uses **ScreLU (Squared Clipped ReLU)**:
 ```
 ScreLU(x) = clamp(x, 0, 255)²
 ```
-This is a widely-used activation function in NNUE, combining ReLU's nonlinearity with squared distribution widening.
 
-### Incremental Update Principle
+### Incremental Updates
 
-The core advantage of NNUE lies in **efficient incremental updates**:
+`Position` maintains one accumulator per side (`nnue_acc[COLOR_NB][kHiddenSize]`), updated incrementally via hooks during move make/unmake.
 
-1. Each move only changes 1-3 positions on the board (from/to/capture)
-2. Only features related to these positions need updating
-3. No need for a full network forward pass
-4. Uses **feature delta refresh** to quickly update input layer activations
+### Score Conversion Chain
 
-### Core Components
+| Function | Input | Output | Description |
+|----------|-------|--------|-------------|
+| `eval(pos)` | Position | int | Raw NNUE output |
+| `search_score(v, pos)` | raw | int | Internal search score |
+| `search_score_to_cp(score, pos)` | search | int | UCI centipawn display |
+| `search_score_to_wdl(score, pos)` | search | WdlTriplet | Win-draw-loss triplet |
+| `win_rate_params(pos)` | Position | WinRateParams | Sigmoid params (a=center, b=slope) |
+| `win_rate_model(v, pos)` | raw | int | Direct to win rate |
 
-#### Network Loading
-
-Supports two formats:
-| Format | Extension | Description |
-|--------|-----------|-------------|
-| Native | `.nnue` | MagnusChess proprietary network format |
-| Bullet quantized | `.bin` | Quantized network format, `NetworkFileQuantized` |
-
-The `NnueNetwork` struct stores all weights and biases, loaded via `load_nnue_network()`.
-
-#### Forward Propagation (`forward()`)
-
-Receives feature index sets, computes the final evaluation:
-1. Input layer: Iterate over valid feature indices, accumulate corresponding weights (incremental)
-2. Hidden layer: `ScreLU(input_hidden × weights + bias)`
-3. Output layer: `hidden_output × output_weights + output_bias`
-
-#### AVX2 SIMD Acceleration
-
-Key computation paths are accelerated using **AVX2** instruction set:
-- 256-bit vectorized weight accumulation
-- SIMD instructions like `_mm256_add_epi16`, `_mm256_madd_epi16`
-- Parallel processing of 16 16-bit elements
-
-#### Score Conversion
+### Network Lifecycle
 
 | Function | Description |
 |----------|-------------|
-| `cp_to_wdl()` | CP (centipawn) → win-draw-loss |
-| `wdl_to_cp()` | WDL → CP |
-| `winrate_to_cp()` | Win rate → CP |
+| `load(path)` | Load network from file (supports .nnue and .bin) |
+| `unload()` | Unload current network |
+| `loaded()` / `path()` / `description()` / `last_error()` | State queries |
 
-### Key Functions
+### File Formats
 
-| Function | Description |
-|----------|-------------|
-| `load_nnue_network()` | Load NNUE network from file |
-| `forward()` | Execute NNUE forward pass |
-| `nnue_evaluate()` | Full NNUE evaluation (feature extraction + forward) |
-| `init_nnue()` | Initialize NNUE system |
-| `refresh_features()` | Incrementally update input features |
+- **Native .nnue** — Magnus proprietary format with header
+- **Bullet .bin** — Rust simple.rs quantized format, no header
 
-### Integration with HCE
+### AVX2 SIMD
+
+Key computation paths use AVX2: 256-bit vectorized weight accumulation (16 hidden neurons per iteration, 128/16 = 8 rounds).
+
+---
+
+## MNUE-P2/P4 — `namespace magnus::mnue`
+
+### Architecture Overview
+
+MNUE uses a **dual-network cascade**:
+
+| Network | Structure | Hidden | Purpose |
+|---------|-----------|--------|---------|
+| **P2** (Filter) | 10240 → 1024 → 1 | 1024 | Fast base eval for most search nodes |
+| **P4** (Refine) | 20480 → 5120 → 1 | 5120 | Precision refine, selected nodes only |
+
+P4 is intentionally lazy: not written into TT raw eval in first integration stage.
+
+### P2 Specifications
 
 ```
-Evaluation selection logic:
-if (NNUE available && position.count >= threshold):
-    eval = nnue_evaluate(pos, mem)
+Input: 10240 features = 16 buckets × 2 colors × 5 non-king types × 64 squares
+Hidden: 1024 neurons (i16)
+Arch ID: 2
+```
+
+P2 uses persistent incremental accumulator: `Position::mnue_p2_acc[COLOR_NB][1024]`.
+
+### P4 Specifications
+
+```
+Input: 20480 features = 32 buckets × 2 colors × 5 non-king types × 64 squares
+Hidden: 5120 neurons (i16)
+Arch ID: 4
+```
+
+P4 uses lazy rebuild: no incremental accumulator, rebuilt from scratch each evaluation.
+
+### Lifecycle
+
+| Function | Description |
+|----------|-------------|
+| `load_p2(path)` / `load_p4(path)` | Load P2/P4 network |
+| `unload_p2()` / `unload_p4()` / `unload_all()` | Unload networks |
+| `p2_loaded()` / `p4_loaded()` | Check load state |
+
+### Evaluation
+
+| Function | Description |
+|----------|-------------|
+| `eval_p2(pos)` | P2 base eval (hot path, incremental accumulator) |
+| `eval_p4_lazy(pos)` | P4 lazy eval (cold path, rebuild each time) |
+| `debug_eval_p2_reference(pos)` | P2 reference eval (full rebuild, verify incremental correctness) |
+| `debug_check_p2_incremental(pos, out)` | Verify P2 incremental accumulator vs full rebuild |
+
+### MNUE Score Conversion
+
+Reuses `nnue::WinRateParams` and `nnue::WdlTriplet` types with its own conversion functions.
+
+### MNUE Incremental Hooks
+
+Same interface as NNUE, called by Position move make/unmake.
+
+### Debug Tools
+
+- `debug_dump_p2_features(pos, out)` — UCI `mnuedebug` command: prints P2 input buckets, active feature indices, output bucket, raw P2 eval
+- `p2_i32_forward_enabled()` — Whether i32 forward is enabled
+- `p2_w1_max_abs()` — Max absolute output weight
+
+### Evaluation Selection Logic (conceptual)
+
+```
+if (P2 loaded):
+    eval = eval_p2(pos)
+    if (need precise && P4 loaded):
+        eval = eval_p4_lazy(pos)
+else if (NNUE loaded):
+    eval = nnue::eval(pos)
 else:
-    eval = evaluate(pos, mem)  // HCE fallback
+    eval = eval::evaluate(pos)  // HCE fallback
 ```
+
+### Design Notes
+- P2 uses persistent incremental accumulators (O(hidden) update vs O(input×hidden)), ideal for search hot path
+- P4 uses lazy rebuild strategy, used only at critical nodes (root, PV)
+- Dual-network architecture enables flexible speed/accuracy trade-off
+- Incremental accumulator correctness verified via `debug_check_p2_incremental()`
+- Trainer/engine feature index alignment verified via `debug_dump_p2_features()`
