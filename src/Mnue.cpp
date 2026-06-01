@@ -71,6 +71,7 @@ struct Network {
     std::vector<i16> w1;
     std::vector<i16> b1;
     int w1_max_abs = 0;
+    bool forward_madd_safe = false;
     bool forward_i32_safe = false;
 
     [[nodiscard]] bool valid() const noexcept {
@@ -128,6 +129,7 @@ void clear_network(Network<Layout>& net) noexcept {
     net.w1.clear();
     net.b1.clear();
     net.w1_max_abs = 0;
+    net.forward_madd_safe = false;
     net.forward_i32_safe = false;
 }
 
@@ -158,6 +160,7 @@ void refresh_network_traits(Network<Layout>& net) noexcept {
     }
 
     net.w1_max_abs = max_abs;
+    net.forward_madd_safe = max_abs <= 128;
     net.forward_i32_safe = max_abs <= max_safe_i32_w1_abs<Layout>();
 }
 
@@ -502,6 +505,52 @@ template<class Layout>
 template<class Layout>
 using Accumulator = std::array<i16, Layout::HiddenSize>;
 
+// Stockfish refreshes stale NNUE accumulators from a king-indexed cache.
+// P2 can use the same idea with MNUE's coarser input bucket as the key.
+struct P2RefreshEntry {
+    Accumulator<P2Layout> accumulation{};
+    std::array<Piece, SQ_NB> board{};
+    bool initialized = false;
+
+    void reset_to_biases() noexcept {
+        std::copy(g_p2.b0.begin(), g_p2.b0.end(), accumulation.begin());
+        board.fill(PIECE_NONE);
+        initialized = true;
+    }
+};
+
+struct P2RefreshCache {
+    u32 generation = 0;
+    std::array<std::array<P2RefreshEntry, P2Layout::InputBuckets>, COLOR_NB> entries{};
+
+    void sync(u32 current_generation) noexcept {
+        if (generation == current_generation)
+            return;
+
+        for (auto& side_entries : entries)
+            for (auto& entry : side_entries)
+                entry.initialized = false;
+
+        generation = current_generation;
+    }
+};
+
+[[nodiscard]] P2RefreshEntry& p2_refresh_entry(
+    Color perspective,
+    int bucket,
+    u32 current_generation
+) noexcept {
+    thread_local P2RefreshCache cache{};
+    cache.sync(current_generation);
+
+    auto& entry = cache.entries[static_cast<std::size_t>(perspective)]
+                               [static_cast<std::size_t>(bucket)];
+    if (!entry.initialized)
+        entry.reset_to_biases();
+
+    return entry;
+}
+
 
 #if defined(__AVX2__)
 template<class Layout>
@@ -679,6 +728,65 @@ void rebuild_accumulator(
     return _mm256_cvtepi32_epi64(v);
 }
 
+[[nodiscard]] i64 dot_pair_screlu_i16_madd_avx2(
+    const i16* acc0,
+    const i16* weights0,
+    const i16* acc1,
+    const i16* weights1,
+    int count
+) noexcept {
+    const __m256i zero16 = _mm256_setzero_si256();
+    const __m256i clip16 = _mm256_set1_epi16(static_cast<i16>(kClip));
+    __m256i sum0_32 = _mm256_setzero_si256();
+    __m256i sum1_32 = _mm256_setzero_si256();
+
+    int i = 0;
+    for (; i + 15 < count; i += 16) {
+        const __m256i acc0_16_raw = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(acc0 + i)
+        );
+        const __m256i w0_16 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(weights0 + i)
+        );
+        const __m256i acc1_16_raw = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(acc1 + i)
+        );
+        const __m256i w1_16 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(weights1 + i)
+        );
+
+        const __m256i clipped0_16 = _mm256_min_epi16(
+            _mm256_max_epi16(acc0_16_raw, zero16),
+            clip16
+        );
+        const __m256i clipped1_16 = _mm256_min_epi16(
+            _mm256_max_epi16(acc1_16_raw, zero16),
+            clip16
+        );
+
+        const __m256i aw0_16 = _mm256_mullo_epi16(clipped0_16, w0_16);
+        const __m256i aw1_16 = _mm256_mullo_epi16(clipped1_16, w1_16);
+
+        sum0_32 = _mm256_add_epi32(
+            sum0_32,
+            _mm256_madd_epi16(clipped0_16, aw0_16)
+        );
+        sum1_32 = _mm256_add_epi32(
+            sum1_32,
+            _mm256_madd_epi16(clipped1_16, aw1_16)
+        );
+    }
+
+    i64 total = horizontal_sum_epi32_to_i64_avx2(sum0_32)
+        + horizontal_sum_epi32_to_i64_avx2(sum1_32);
+    for (; i < count; ++i) {
+        total += static_cast<i64>(screlu(acc0[i])) * static_cast<i64>(weights0[i]);
+        total += static_cast<i64>(screlu(acc1[i])) * static_cast<i64>(weights1[i]);
+    }
+
+    return total;
+}
+
 [[nodiscard]] i64 dot_pair_screlu_i16_i32_avx2(
     const i16* acc0,
     const i16* weights0,
@@ -845,7 +953,15 @@ template<class Layout>
 
     i64 output = 0;
 #if defined(__AVX2__)
-    if (net.forward_i32_safe) {
+    if (net.forward_madd_safe) {
+        output += dot_pair_screlu_i16_madd_avx2(
+            stm_acc.data(),
+            w_stm,
+            nstm_acc.data(),
+            w_nstm,
+            Layout::HiddenSize
+        );
+    } else if (net.forward_i32_safe) {
         output += dot_pair_screlu_i16_i32_avx2(
             stm_acc.data(),
             w_stm,
@@ -925,20 +1041,52 @@ template<class Layout>
     return forward<Layout>(pos, net, stm_acc, nstm_acc);
 }
 
-
-void rebuild_p2_accumulator(const Position& pos, Color perspective) noexcept {
+void refresh_p2_accumulator_from_cache(
+    const Position& pos,
+    Color perspective,
+    u32 current_generation
+) noexcept {
     if (!g_p2.loaded || !g_p2.valid())
         return;
 
-    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
-    sync_p2_generation(pos, current);
-    rebuild_accumulator<P2Layout>(
-        pos,
+    sync_p2_generation(pos, current_generation);
+
+    const int bucket = input_bucket<P2Layout>(pos, perspective);
+    P2RefreshEntry& entry = p2_refresh_entry(
         perspective,
-        pos.mnue_p2_acc[perspective],
-        g_p2
+        bucket,
+        current_generation
     );
 
+    for (int sq_idx = 0; sq_idx < SQ_NB; ++sq_idx) {
+        const Square sq = static_cast<Square>(sq_idx);
+        const Piece old_pc = entry.board[static_cast<std::size_t>(sq_idx)];
+        const Piece new_pc = piece_on(pos, sq);
+        if (old_pc == new_pc)
+            continue;
+
+        const int old_idx = feature_index<P2Layout>(
+            perspective,
+            bucket,
+            old_pc,
+            sq
+        );
+        if (old_idx >= 0)
+            sub_feature<P2Layout>(entry.accumulation, g_p2, old_idx);
+
+        const int new_idx = feature_index<P2Layout>(
+            perspective,
+            bucket,
+            new_pc,
+            sq
+        );
+        if (new_idx >= 0)
+            add_feature<P2Layout>(entry.accumulation, g_p2, new_idx);
+
+        entry.board[static_cast<std::size_t>(sq_idx)] = new_pc;
+    }
+
+    pos.mnue_p2_acc[perspective] = entry.accumulation;
     pos.mnue_p2_acc_valid_mask = static_cast<std::uint8_t>(
         pos.mnue_p2_acc_valid_mask | p2_perspective_mask(perspective)
     );
@@ -947,9 +1095,9 @@ void rebuild_p2_accumulator(const Position& pos, Color perspective) noexcept {
 inline void ensure_p2_accumulators(const Position& pos) noexcept {
     const u32 current = g_p2_generation.load(std::memory_order_relaxed);
     if (!p2_accumulator_matches(pos, WHITE, current))
-        rebuild_p2_accumulator(pos, WHITE);
+        refresh_p2_accumulator_from_cache(pos, WHITE, current);
     if (!p2_accumulator_matches(pos, BLACK, current))
-        rebuild_p2_accumulator(pos, BLACK);
+        refresh_p2_accumulator_from_cache(pos, BLACK, current);
 }
 
 [[nodiscard]] int eval_p2_incremental(const Position& pos) noexcept {
