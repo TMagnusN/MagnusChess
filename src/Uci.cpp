@@ -91,7 +91,7 @@ constexpr int MIN_UCI_CONTEMPT = -10000;
 constexpr int MAX_UCI_CONTEMPT = 10000;
 
 static std::string default_mnue_p2_file() {
-    return "6df83890b.MNUE";
+    return "b7a644d5d.MNUE";
 }
 
 [[nodiscard]] const std::string& get_executable_dir() {
@@ -941,7 +941,7 @@ struct UciSession {
     const bool is_beta = true;
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess\U0001F984 1.3.75 by the Magnus developer ";
+        out << "MagnusChess\U0001F984 1.4.75 by the Magnus developer ";
         if (is_beta) {
             out << "& This is a beta version";
         }
@@ -949,7 +949,7 @@ struct UciSession {
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess 1.3.75 ";
+        out << "id name MagnusChess 1.4.75 ";
         
         if(is_beta) {
             out << "for Beta Testing";
@@ -1153,7 +1153,6 @@ struct UciSession {
             const int raw_stm = mnue::eval_p2(pos);
             const int search_stm = mnue::search_score(raw_stm, pos);
             const int search_cp_stm = mnue::search_score_to_cp(search_stm, pos);
-            const int winrate_stm = mnue::win_rate_model(raw_stm, pos);
             const mnue::WdlTriplet wdl_white =
                 white_pov_wdl(pos, mnue::search_score_to_wdl(search_stm, pos));
 
@@ -1163,7 +1162,7 @@ struct UciSession {
             out << "info string mnue p2 search " << white_pov_score(pos, search_stm) << '\n';
             out << "info string mnue p2 searchcp " << white_pov_score(pos, search_cp_stm) << '\n';
             out << "info string mnue p2 winrate "
-                << white_pov_winrate(pos, winrate_stm) << '\n';
+                << wdl_white.win << '\n';
             out << "info string mnue p2 wdl "
                 << wdl_white.win << ' '
                 << wdl_white.draw << ' '
@@ -1480,20 +1479,20 @@ struct UciSession {
 
     void handle_go(std::string_view line, std::ostream& out) {
         ensure_attack_ready();
+        ensure_search_eval_ready(out, "info string nnue unavailable, search will use hce");
+
         search::SearchLimits limits{};
+        limits.use_nnue = use_nnue;
         if (!parse_go_command(pos, mem, time_manager, line, limits)) {
             out << "info string usage: " << go_usage_hint() << '\n';
             out << "info string " << go_usage_examples() << '\n';
             return;
         }
 
-        ensure_search_eval_ready(out, "info string nnue unavailable, search will use hce");
-
         if (mnue_active()){
             std :: cout << "info string MNUE evaluation using " << mnue_name() << "(20.1 MB, (1,32,16,1024,10240))\n";
         }
 
-        limits.use_nnue = use_nnue;
         limits.contempt = contempt;
         limits.stop = &stop_requested;
         limits.pondering = &pondering;
@@ -1510,6 +1509,7 @@ struct UciSession {
         search_start_ms.store(steady_now_ms(), std::memory_order_release);
 
         const Position root = pos;
+        search_running.store(true, std::memory_order_release);
         search_thread = std::thread([this, root, limits]() {
             PvTrackingStreamBuf pv_tracking_buf(std::cout.rdbuf());
             std::ostream tracked_out(&pv_tracking_buf);
@@ -1553,7 +1553,6 @@ struct UciSession {
             search_start_ms.store(0, std::memory_order_release);
             search_running.store(false, std::memory_order_release);
         });
-        search_running.store(true, std::memory_order_release);
     }
 
     void handle_perft(std::string_view line, std::ostream& out) {

@@ -26,7 +26,9 @@ SOFTWARE.
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
+#include "Mnue.h"
 #include "MoveGen.h"
 #include "Nnue.h"
 
@@ -40,6 +42,9 @@ namespace magnus::timeman {
 namespace {
 
 constexpr int kMoveOverheadMs = 10;
+constexpr double kTargetSingleThreadNps = 2'400'000.0;
+constexpr u64 kMnueBootstrapNps = 1'100'000ULL;
+constexpr u64 kNnueBootstrapNps = 1'700'000ULL;
 
 [[nodiscard]] inline int time_left_overhead(int remaining, int centi_mtg) noexcept {
     const int current_move_overhead = kMoveOverheadMs * 2;
@@ -179,6 +184,78 @@ bool TimeManager::build_limits(
             static_cast<int>(max_scale * double(std::max(1, optimum)))
         );
         int maximum = std::max(1, std::min(maximum_cap, scaled_maximum));
+
+        const HistoryStats stats = collect_stats(side);
+        u64 effective_nps = stats.avg_nps;
+        if (effective_nps == 0) {
+            if (limits.use_nnue && mnue::p2_loaded())
+                effective_nps = kMnueBootstrapNps;
+            else if (limits.use_nnue && nnue::loaded())
+                effective_nps = kNnueBootstrapNps;
+        }
+
+        double nps_scale = 1.0;
+        if (effective_nps > 0) {
+            const double ratio = kTargetSingleThreadNps / double(effective_nps);
+            nps_scale = std::clamp(
+                std::pow(std::clamp(ratio, 0.35, 4.0), 0.55),
+                0.72,
+                1.85
+            );
+        }
+
+        double instability_scale = 1.0;
+        if (stats.samples >= 3) {
+            instability_scale += std::clamp(
+                (double(stats.best_move_flip_pct) - 35.0) / 220.0,
+                0.0,
+                0.25
+            );
+            instability_scale += std::clamp(
+                (double(stats.avg_score_swing_cp) - 25.0) / 320.0,
+                0.0,
+                0.20
+            );
+        }
+
+        double node_floor_scale = 1.0;
+        if (stats.avg_nodes > 0 && effective_nps > 0) {
+            const double expected_nodes =
+                double(effective_nps) * double(std::max(1, optimum)) / 1000.0;
+            const double target_nodes =
+                double(stats.avg_nodes) * (stats.avg_depth < 10 ? 1.10 : 0.95);
+            if (expected_nodes > 1.0 && target_nodes > expected_nodes) {
+                node_floor_scale = std::clamp(
+                    std::sqrt(target_nodes / expected_nodes),
+                    1.0,
+                    1.30
+                );
+            }
+        }
+
+        const double soft_scale = std::clamp(
+            nps_scale * instability_scale * node_floor_scale,
+            0.70,
+            2.10
+        );
+        const double hard_scale = std::clamp(
+            1.0 + (soft_scale - 1.0) * 0.65,
+            0.85,
+            1.65
+        );
+
+        const auto scale_ms = [](int value, double scale) noexcept {
+            const double scaled = std::clamp(
+                double(std::max(1, value)) * scale,
+                1.0,
+                double(std::numeric_limits<int>::max())
+            );
+            return static_cast<int>(std::llround(scaled));
+        };
+
+        optimum = scale_ms(optimum, soft_scale);
+        maximum = std::min(maximum_cap, scale_ms(maximum, hard_scale));
+
         if (params.movestogo > 0)
             maximum = std::min(
                 maximum,
@@ -192,6 +269,8 @@ bool TimeManager::build_limits(
 
         if (params.ponder)
             optimum += optimum / 4;
+        else
+            optimum = std::min(optimum, maximum);
 
         limits.soft_time_ms = optimum;
         limits.hard_time_ms = maximum;
@@ -225,11 +304,16 @@ void TimeManager::record_search(
     record.soft_time_ms = std::max(0, limits.soft_time_ms);
     record.hard_time_ms = std::max(0, limits.hard_time_ms);
     record.elapsed_ms = std::max(0, elapsed_ms);
+    record.nodes = result.nodes;
+    if (elapsed_ms > 0 && result.nodes > 0)
+        record.nps = (result.nodes * 1000ULL) / static_cast<u64>(elapsed_ms);
     record.depth = std::max(0, result.depth);
-    record.score_cp =
-        limits.use_nnue && nnue::loaded()
-            ? nnue::search_score_to_cp(result.score, root)
-            : result.score;
+    if (limits.use_nnue && mnue::p2_loaded())
+        record.score_cp = mnue::search_score_to_cp(result.score, root);
+    else if (limits.use_nnue && nnue::loaded())
+        record.score_cp = nnue::search_score_to_cp(result.score, root);
+    else
+        record.score_cp = result.score;
     record.best_move = result.best_move;
 
     push_record(record);
@@ -261,6 +345,12 @@ TimeManager::HistoryStats TimeManager::collect_stats(Color side) const noexcept 
     int swing_count = 0;
     int move_flip_count = 0;
     int move_transition_count = 0;
+    u64 node_sum = 0;
+    int node_count = 0;
+    int depth_sum = 0;
+    int depth_count = 0;
+    u64 nps_weighted_sum = 0;
+    int nps_weight_sum = 0;
 
     int prev_score = 0;
     Move prev_move = 0;
@@ -276,6 +366,28 @@ TimeManager::HistoryStats TimeManager::collect_stats(Color side) const noexcept 
             continue;
 
         ++stats.samples;
+        const int recency_weight = static_cast<int>(
+            SAMPLE_CAP - std::min<std::size_t>(
+                static_cast<std::size_t>(stats.samples - 1),
+                SAMPLE_CAP - 1
+            )
+        );
+
+        if (rec.nodes > 0) {
+            node_sum += rec.nodes;
+            ++node_count;
+        }
+
+        if (rec.depth > 0) {
+            depth_sum += rec.depth;
+            ++depth_count;
+        }
+
+        if (rec.nps > 0) {
+            nps_weighted_sum += rec.nps * static_cast<u64>(recency_weight);
+            nps_weight_sum += recency_weight;
+            ++stats.nps_samples;
+        }
 
         if (rec.soft_time_ms > 0 && rec.elapsed_ms > 0) {
             usage_sum += (static_cast<i64>(rec.elapsed_ms) * 100) / rec.soft_time_ms;
@@ -304,6 +416,12 @@ TimeManager::HistoryStats TimeManager::collect_stats(Color side) const noexcept 
 
     if (usage_count > 0)
         stats.avg_usage_pct = static_cast<int>(usage_sum / usage_count);
+    if (node_count > 0)
+        stats.avg_nodes = node_sum / static_cast<u64>(node_count);
+    if (depth_count > 0)
+        stats.avg_depth = depth_sum / depth_count;
+    if (nps_weight_sum > 0)
+        stats.avg_nps = nps_weighted_sum / static_cast<u64>(nps_weight_sum);
     if (swing_count > 0)
         stats.avg_score_swing_cp = static_cast<int>(swing_sum / swing_count);
     if (move_transition_count > 0)

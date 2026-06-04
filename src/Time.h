@@ -114,6 +114,8 @@ public:
 private:
     // SearchRecord — 單次搜尋的歷史記錄
     struct SearchRecord {
+        u64 nodes = 0;                  // searched nodes
+        u64 nps = 0;                    // measured nodes per second
         Color side = WHITE;             // 走子方
         int fullmove_number = 1;        // 完整回合數
         int soft_time_ms = 0;           // 軟時間限制
@@ -126,6 +128,10 @@ private:
 
     // HistoryStats — 從歷史記錄計算的統計數據
     struct HistoryStats {
+        u64 avg_nodes = 0;              // average searched nodes
+        u64 avg_nps = 0;                // rolling measured NPS
+        int avg_depth = 0;              // average completed depth
+        int nps_samples = 0;            // samples with measured NPS
         int samples = 0;                // 樣本數
         int avg_usage_pct = 100;        // 平均時間使用率（百分比）
         int avg_score_swing_cp = 0;     // 平均分數擺動（cp）
