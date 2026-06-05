@@ -16,6 +16,31 @@ MagnusChess🦄 is a C++20 chess engine with UCI support, a classical search cor
 
 ---
 
+## MNUE Network
+
+MagnusChess uses an external `.MNUE` network file for neural evaluation.
+
+To keep the source repository lightweight, MNUE network files are stored separately in the MagnusMNUE repository:
+
+https://github.com/MagnusU0001F984/MagnusMNUE
+
+Download the desired `.MNUE` file from that repository and place it next to the MagnusChess executable, for example:
+
+```text
+MagnusChess.exe
+b7a644d5d.MNUE
+````
+
+You can also specify a custom network path through UCI:
+
+```text
+setoption name MNUEfile value path/to/network.MNUE
+```
+
+If no valid MNUE file is found, MagnusChess may fall back to non-MNUE evaluation or report that the network file could not be loaded.
+
+---
+
 ## Technical Overview 🧠⚙️
 
 ### 1. Core Architecture 🏗️
