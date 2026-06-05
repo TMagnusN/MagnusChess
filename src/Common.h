@@ -147,6 +147,25 @@ namespace magnus {
     return false;
 }
 
+[[nodiscard]] inline bool legal_move_exists(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move
+) noexcept {
+    if (move_is_none(move))
+        return false;
+
+    MoveList list{};
+    generate_legal(pos, mem, list);
+
+    for (int i = 0; i < list.size; ++i) {
+        if (list.moves[i] == move)
+            return true;
+    }
+
+    return false;
+}
+
 class PvTrackingStreamBuf final : public std::streambuf {
 public:
     explicit PvTrackingStreamBuf(std::streambuf* sink) noexcept
@@ -272,6 +291,33 @@ private:
         return {};
 
     return search::move_to_uci(ponder_move);
+}
+
+[[nodiscard]] inline std::string ponder_move_from_search_result(
+    const Position& root,
+    memory::Memory& mem,
+    const search::SearchResult& result
+) noexcept {
+    const Move best_move = result.best_move;
+    if (move_is_none(best_move))
+        return {};
+
+    Position after_best{};
+    position_copy_without_accumulators(after_best, root);
+    do_move_copy(after_best, best_move, mem.tables);
+
+    if (result.pv_length > 1 &&
+        result.pv[0] == best_move &&
+        legal_move_exists(after_best, mem, result.pv[1])) {
+        return search::move_to_uci(result.pv[1]);
+    }
+
+    const memory::TTProbe probe = memory::tt_probe(mem.tt, after_best.key);
+    const Move tt_move = probe.hit ? static_cast<Move>(probe.data.move) : Move(0);
+    if (legal_move_exists(after_best, mem, tt_move))
+        return search::move_to_uci(tt_move);
+
+    return {};
 }
 
 [[nodiscard]] inline bool parse_fen(

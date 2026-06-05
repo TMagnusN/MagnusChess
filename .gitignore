@@ -23,3 +23,5 @@ Thumbs.db
 src/bin/MagnusChess
 src/bin/.claude/
 .deepseek/
+
+*.MNUE

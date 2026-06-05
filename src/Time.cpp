@@ -41,15 +41,14 @@ namespace magnus::timeman {
 
 namespace {
 
-constexpr int kMoveOverheadMs = 10;
 constexpr double kTargetSingleThreadNps = 2'400'000.0;
 constexpr u64 kMnueBootstrapNps = 1'100'000ULL;
 constexpr u64 kNnueBootstrapNps = 1'700'000ULL;
 
 [[nodiscard]] inline int time_left_overhead(int remaining, int centi_mtg) noexcept {
-    const int current_move_overhead = kMoveOverheadMs * 2;
-    const int future_move_overhead = (kMoveOverheadMs * centi_mtg) / 100;
-    const int future_overhead_cap = std::max(kMoveOverheadMs, remaining / 10);
+    const int current_move_overhead = DEFAULT_MOVE_OVERHEAD_MS * 2;
+    const int future_move_overhead = (DEFAULT_MOVE_OVERHEAD_MS * centi_mtg) / 100;
+    const int future_overhead_cap = std::max(DEFAULT_MOVE_OVERHEAD_MS, remaining / 10);
     return current_move_overhead + std::min(future_move_overhead, future_overhead_cap);
 }
 
@@ -177,7 +176,7 @@ bool TimeManager::build_limits(
         int optimum = std::max(1, static_cast<int>(opt_scale * double(time_left)));
         const int maximum_cap = std::max(
             1,
-            static_cast<int>(0.825179 * double(remaining) - kMoveOverheadMs)
+            static_cast<int>(0.825179 * double(remaining) - DEFAULT_MOVE_OVERHEAD_MS)
         );
         const int scaled_maximum = std::max(
             std::max(1, remaining / 4),

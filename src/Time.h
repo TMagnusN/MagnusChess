@@ -51,6 +51,8 @@ SOFTWARE.
  */
 namespace magnus::timeman {
 
+inline constexpr int DEFAULT_MOVE_OVERHEAD_MS = 10;
+
 /*
  * GoParams — 從 UCI "go" 命令解析出的標準化時間參數
  *

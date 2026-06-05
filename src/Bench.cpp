@@ -345,15 +345,10 @@ void render_eval_bench_timing(
         std::ostream tracked_out(&pv_tracking_buf);
         result.search = search::iterative_deepening(pos, mem, limits, &tracked_out);
         tracked_out.flush();
-        result.ponder = ponder_move_from_last_pv(
-            pos,
-            mem,
-            result.search.best_move,
-            pv_tracking_buf.last_pv()
-        );
     } else {
         result.search = search::iterative_deepening(pos, mem, limits, nullptr);
     }
+    result.ponder = ponder_move_from_search_result(pos, mem, result.search);
     const auto end = clock::now();
 
     const u64 time_ms = static_cast<u64>(
@@ -482,6 +477,7 @@ bool run_search_bench(
         limits.thread_count = search_threads;
         limits.thread_id = 0;
         limits.report_info = true;
+        limits.recover_ponder_pv = emit_ponder;
 
         const SearchBenchResult res = benchmark_search_position(
             bench_pos,
@@ -539,6 +535,7 @@ bool run_timed_search_bench(
         limits.thread_count = search_threads;
         limits.thread_id = 0;
         limits.report_info = true;
+        limits.recover_ponder_pv = emit_ponder;
 
         const SearchBenchResult res = benchmark_search_position(
             bench_pos,

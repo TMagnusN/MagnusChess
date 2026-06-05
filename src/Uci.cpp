@@ -86,6 +86,7 @@ namespace {
 constexpr int DEFAULT_UCI_DEPTH = 8;
 constexpr int DEFAULT_UCI_THREADS = 1;
 constexpr int MAX_UCI_THREADS = 512;
+constexpr int DEFAULT_UCI_MULTIPV = 1;
 constexpr int DEFAULT_UCI_CONTEMPT = 0;
 constexpr int MIN_UCI_CONTEMPT = -10000;
 constexpr int MAX_UCI_CONTEMPT = 10000;
@@ -865,6 +866,7 @@ struct UciSession {
     int contempt = DEFAULT_UCI_CONTEMPT;
     std::string eval_file = default_eval_file();
     std::string eval_file_p2 = default_mnue_p2_file();
+    std::string syzygy_path{};
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> search_running{false};
     std::atomic<bool> ponder_search{false};
@@ -909,6 +911,7 @@ struct UciSession {
 
     void stop_search() {
         stop_requested.store(true, std::memory_order_release);
+        pondering.store(false, std::memory_order_release);
         if (search_thread.joinable())
             search_thread.join();
         ponder_search.store(false, std::memory_order_release);
@@ -960,12 +963,20 @@ struct UciSession {
         out << "id author Magnus\U0001F984(gitvalerain@gmail.com)\n";
         out << "option name Hash type spin default 16 min 1 max 1048576\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
+        out << "option name MultiPV type spin default " << DEFAULT_UCI_MULTIPV
+            << " min " << DEFAULT_UCI_MULTIPV
+            << " max " << DEFAULT_UCI_MULTIPV << "\n";
         out << "option name Contempt type spin default " << DEFAULT_UCI_CONTEMPT
             << " min " << MIN_UCI_CONTEMPT
             << " max " << MAX_UCI_CONTEMPT << "\n";
+        out << "option name Move Overhead type spin default "
+            << timeman::DEFAULT_MOVE_OVERHEAD_MS
+            << " min " << timeman::DEFAULT_MOVE_OVERHEAD_MS
+            << " max " << timeman::DEFAULT_MOVE_OVERHEAD_MS << "\n";
         out << "option name Clear Hash type button\n";
         out << "option name UseNNUE type check default true\n";
         out << "option name Ponder type check default true\n";
+        out << "option name SyzygyPath type string default <empty>\n";
         out << "option name MNUEfile type string default " << eval_file_p2 << '\n';
         out << "uciok" << std::endl;
     }
@@ -1087,6 +1098,9 @@ struct UciSession {
             if (parse_int(value, parsed_threads))
                 threads = std::clamp(parsed_threads, 1, MAX_UCI_THREADS);
         }
+        else if (name == "MultiPV") {
+            // Advertised for GUI compatibility; search currently supports one principal variation.
+        }
         else if (name == "Contempt") {
             int parsed_contempt = 0;
             if (parse_int(value, parsed_contempt)) {
@@ -1098,6 +1112,9 @@ struct UciSession {
         }
         else if (name == "Clear Hash") {
             memory::memory_clear_hash(mem);
+        }
+        else if (name == "Move Overhead") {
+            // Fixed at timeman::DEFAULT_MOVE_OVERHEAD_MS until runtime tuning is implemented.
         }
         else if (name == "UseNNUE") {
             bool parsed = false;
@@ -1114,6 +1131,9 @@ struct UciSession {
             bool parsed = false;
             if (parse_bool(value, parsed))
                 enable_ponder = parsed;
+        }
+        else if (name == "SyzygyPath") {
+            syzygy_path = value == "<empty>" ? std::string{} : value;
         }
         else if (name == "MNUEfile") {
             if (!value.empty()) {
@@ -1500,6 +1520,7 @@ struct UciSession {
         limits.thread_count = threads;
         limits.thread_id = 0;
         limits.report_info = true;
+        limits.recover_ponder_pv = enable_ponder || limits.ponder;
         copy_history_to_limits(limits);
         stop_requested.store(false, std::memory_order_release);
         ponder_search.store(limits.ponder, std::memory_order_release);
@@ -1535,11 +1556,10 @@ struct UciSession {
             if (ponder_was_hit)
                 time_manager.record_search(root, limits, result, record_elapsed_ms);
 
-            const std::string ponder = ponder_move_from_last_pv(
+            const std::string ponder = ponder_move_from_search_result(
                 root,
                 mem,
-                result.best_move,
-                pv_tracking_buf.last_pv()
+                result
             );
 
             std::cout << "bestmove " << search::move_to_uci(result.best_move);

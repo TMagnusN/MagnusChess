@@ -1106,6 +1106,7 @@ struct Searcher {
             timed_elapsed_ms() >= limits.hard_time_ms) {
             if (pondering_active()) {
                 stop_on_ponderhit = true;
+                return false;
             } else {
                 stopped = true;
                 hard_stop = true;
@@ -2998,6 +2999,64 @@ struct Searcher {
         save_tt(root, depth, 0, best_score, raw_eval, result.best_move, alpha0, beta, true);
         return result;
     }
+
+    [[nodiscard]] bool root_pv_has_legal_ponder_move(
+        const Position& root,
+        Move best_move
+    ) const noexcept {
+        if (move_is_none(best_move) ||
+            pv_length[0] < 2 ||
+            pv_table[0][0] != best_move) {
+            return false;
+        }
+
+        Position after_best{};
+        position_copy_without_accumulators(after_best, root);
+        do_move_copy(after_best, best_move, mem.tables);
+
+        MoveList replies{};
+        generate_legal(after_best, mem, replies);
+        const Move ponder_move = pv_table[0][1];
+        for (int i = 0; i < replies.size; ++i) {
+            if (replies.moves[i] == ponder_move)
+                return true;
+        }
+
+        return false;
+    }
+
+    [[nodiscard]] u64 recover_ponder_pv_full_window(
+        const Position& root,
+        SearchResult& result,
+        int depth
+    ) noexcept {
+        if (!limits.recover_ponder_pv ||
+            stopped ||
+            depth < 2 ||
+            move_is_none(result.best_move) ||
+            root_pv_has_legal_ponder_move(root, result.best_move)) {
+            return 0;
+        }
+
+        const u64 nodes_before = nodes;
+        const RootMoveResult repair = search_root_move(
+            root,
+            result.best_move,
+            depth,
+            -VALUE_INF,
+            VALUE_INF,
+            true
+        );
+        const u64 node_delta = nodes >= nodes_before ? nodes - nodes_before : 0;
+
+        if (!stopped) {
+            result.score = repair.score;
+            result.nodes = nodes;
+            result.seldepth = seldepth;
+        }
+
+        return node_delta;
+    }
 };
 
 struct IterationTimeState {
@@ -3300,8 +3359,11 @@ void capture_completed_result(
 ) noexcept {
     result.best = best;
     result.pv_length = searcher.pv_length[0];
-    for (int i = 0; i < result.pv_length; ++i)
+    result.best.pv_length = result.pv_length;
+    for (int i = 0; i < result.pv_length; ++i) {
         result.pv[i] = searcher.pv_table[0][i];
+        result.best.pv[i] = result.pv[i];
+    }
 }
 
 void emit_iteration_info(
@@ -3432,6 +3494,17 @@ void emit_iteration_info(
             break;
         }
 
+        if (!searcher.stopped && !move_is_none(current.best_move)) {
+            const u64 recovery_nodes =
+                searcher.recover_ponder_pv_full_window(keyed_root, current, depth);
+            if (recovery_nodes > 0) {
+                depth_nodes += recovery_nodes;
+                depth_max_seldepth = std::max(depth_max_seldepth, searcher.seldepth);
+                current.seldepth = depth_max_seldepth;
+                searcher.publish_nodes();
+            }
+        }
+
         total_nodes += depth_nodes;
         {
             const int now_ms = searcher.timed_elapsed_ms();
@@ -3541,6 +3614,8 @@ void emit_iteration_info(
     // keep the search "alive" until stop or ponderhit arrives.
     if (searcher.limits.ponder && !searcher.stopped) {
         while (!searcher.stopped && searcher.pondering_active()) {
+            if (searcher.hit_hard_limit())
+                break;
             searcher.publish_nodes();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -3757,6 +3832,49 @@ void emit_iteration_info(
 
     const int best_index = select_lazy_smp_best_index(results);
     IterativeWorkerResult best = results[static_cast<std::size_t>(best_index)];
+
+    const bool selected_needs_ponder_recovery =
+        main_limits.recover_ponder_pv &&
+        best.best.depth >= 2 &&
+        !move_is_none(best.best.best_move) &&
+        (best.pv_length < 2 || best.pv[0] != best.best.best_move);
+    if (selected_needs_ponder_recovery) {
+        std::atomic<bool> recovery_stop{false};
+        SearchLimits recovery_limits = main_limits;
+        recovery_limits.thread_count = 1;
+        recovery_limits.thread_id = 0;
+        recovery_limits.report_info = false;
+        recovery_limits.soft_time_ms = 0;
+        recovery_limits.hard_time_ms = 0;
+        recovery_limits.infinite = true;
+        recovery_limits.use_time_management = false;
+        recovery_limits.ponder = false;
+        recovery_limits.stop = &recovery_stop;
+        recovery_limits.external_stop = limits.stop;
+        recovery_limits.shared_nodes = &shared_nodes;
+
+        Searcher recovery_searcher(mem, recovery_limits);
+        reset_searcher_iteration(recovery_searcher, Searcher::clock::now(), 0);
+        SearchResult recovered = best.best;
+        (void)recovery_searcher.recover_ponder_pv_full_window(
+            root,
+            recovered,
+            recovered.depth
+        );
+        if (!recovery_searcher.stopped &&
+            recovery_searcher.pv_length[0] > 0 &&
+            recovery_searcher.pv_table[0][0] == recovered.best_move) {
+            recovery_searcher.publish_nodes();
+            best.best = recovered;
+            best.pv_length = recovery_searcher.pv_length[0];
+            for (int i = 0; i < best.pv_length; ++i) {
+                best.pv[i] = recovery_searcher.pv_table[0][i];
+                best.best.pv[i] = best.pv[i];
+            }
+            best.best.pv_length = best.pv_length;
+        }
+    }
+
     best.best.nodes = shared_nodes.load(std::memory_order_relaxed);
 
     if (best_index != 0 && out != nullptr) {

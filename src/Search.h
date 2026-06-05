@@ -79,6 +79,7 @@ struct SearchLimits {
     bool ponder = false;                // 是否為沉思模式（對手時間內搜尋）
     bool infinite = false;              // 是否為無限搜尋模式
     bool use_time_management = false;   // 是否啟用 Stockfish 風格時間管理
+    bool recover_ponder_pv = false;     // Ponder 開啟時，必要時 full-window 補主變例第二手
 
     // --- 引擎選項 ---
     int contempt = 0;                   // 輕視值：正值傾向避免和棋，負值傾向接受和棋
@@ -109,14 +110,16 @@ struct SearchLimits {
  * SearchResult — 搜尋結果
  *
  * 反覆加深完成後回傳的結構，包含最佳著法、評分、
- * 以及整體搜尋統計（節點數、深度、選擇性深度）。
+ * 完成的主變例，以及整體搜尋統計（節點數、深度、選擇性深度）。
  */
 struct SearchResult {
     Move best_move = 0;                 // 搜尋找到的最佳著法（0 = 無合法著法）
+    Move pv[MAX_PLY]{};                 // 完成深度的主變例；pv[0] 應等於 best_move
     Score score = 0;                    // 最佳著法的評分（cp 單位，從根節點視角）
     u64 nodes = 0;                      // 搜尋探索的總節點數
     int depth = 0;                      // 完成的搜索深度（ply）
     int seldepth = 0;                   // 選擇性深度：最深的分支實際搜索深度
+    int pv_length = 0;                  // 主變例長度
 };
 
 /*
