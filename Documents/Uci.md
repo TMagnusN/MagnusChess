@@ -53,6 +53,7 @@
 | `Clear Hash` | Button | 清除置换表 |
 | `UseNNUE` | Check | 是否使用 NNUE |
 | `Ponder` | Check | 沉思模式 |
+| `Singular Telemetry` | Check | 收集 singular extension contextual telemetry（实验性，默认关闭） |
 | `SyzygyPath` | String | Syzygy `.rtbw` / `.rtbz` 目录；空值停用 |
 | `SyzygyProbeDepth` | Spin | 达到探测子力上限时开始内部探测的最小深度（1..100） |
 | `Syzygy50MoveRule` | Check | 根节点排序是否遵守 50 步规则 |
@@ -105,11 +106,16 @@ Standard: `uci`, `isready`, `setoption`, `position`, `go`, `stop`, `ponderhit`, 
 ### UCI Options (see README)
 
 `Hash`, `Threads`, `Contempt`, `Move Overhead`, `Clear Hash`, `UseNNUE`,
-`Ponder`, `SyzygyPath`, `SyzygyProbeDepth`, `Syzygy50MoveRule`,
+`Ponder`, `Singular Telemetry`, `SyzygyPath`, `SyzygyProbeDepth`, `Syzygy50MoveRule`,
 `SyzygyProbeLimit`, `EvalFile`.
 
 `Move Overhead` accepts `0..5000` ms and is applied to `wtime/btime` clock
 management. Explicit `go movetime` searches keep the requested fixed duration.
+
+`Singular Telemetry` reports TT trust context, exclusion-search cost, and
+extension outcomes. Singular testing itself uses fixed gates based on TT bound,
+TT depth gap, score relative to beta, cut-like status, move type, history, and
+recent path extensions. Telemetry does not learn or modify these thresholds.
 
 ### Search Thread Management
 
