@@ -90,6 +90,7 @@ struct SearchLimits {
     // --- 引擎選項 ---
     int contempt = 0;                   // 輕視值：正值傾向避免和棋，負值傾向接受和棋
     bool use_nnue = false;              // 是否使用 NNUE 神經網路評估
+    bool singular_telemetry = false;    // 是否收集 singular extension contextual telemetry
 
     // --- 對局歷史（供重複局面檢測）---
     Key game_history_keys[MAX_GAME_HISTORY]{}; // 歷史局面的 Zobrist 鍵值

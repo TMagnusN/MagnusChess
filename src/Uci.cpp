@@ -85,6 +85,7 @@ namespace magnus {
 namespace {
 
 constexpr int DEFAULT_UCI_DEPTH = 8;
+constexpr int DEFAULT_UCI_HASH_MB = 16;
 constexpr int DEFAULT_UCI_THREADS = 1;
 constexpr int MAX_UCI_THREADS = 512;
 constexpr int DEFAULT_UCI_MULTIPV = 1;
@@ -863,6 +864,7 @@ struct UciSession {
     timeman::TimeManager time_manager{};
     bool use_nnue = true;
     bool enable_ponder = true;
+    bool singular_telemetry = false;
     int threads = DEFAULT_UCI_THREADS;
     int contempt = DEFAULT_UCI_CONTEMPT;
     int syzygy_probe_depth = syzygy::DEFAULT_PROBE_DEPTH;
@@ -881,7 +883,7 @@ struct UciSession {
     std::thread search_thread;
 
     UciSession() {
-        memory::memory_init(mem, 64, 8, 2);
+        memory::memory_init(mem, DEFAULT_UCI_HASH_MB, 8, 2);
         // attack_init_backend deferred to first command that needs it.
         set_start_position(pos);
         position_refresh_key(pos, mem.tables);
@@ -966,7 +968,8 @@ struct UciSession {
         out << '\n';
 
         out << "id author Magnus\U0001F984(gitvalerain@gmail.com)\n";
-        out << "option name Hash type spin default 16 min 1 max 1048576\n";
+        out << "option name Hash type spin default " << DEFAULT_UCI_HASH_MB
+            << " min 1 max 1048576\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
         out << "option name MultiPV type spin default " << DEFAULT_UCI_MULTIPV
             << " min " << DEFAULT_UCI_MULTIPV
@@ -981,6 +984,7 @@ struct UciSession {
         out << "option name Clear Hash type button\n";
         out << "option name UseNNUE type check default true\n";
         out << "option name Ponder type check default true\n";
+        out << "option name Singular Telemetry type check default false\n";
         out << "option name SyzygyPath type string default <empty>\n";
         out << "option name SyzygyProbeDepth type spin default "
             << syzygy::DEFAULT_PROBE_DEPTH
@@ -1147,6 +1151,11 @@ struct UciSession {
             bool parsed = false;
             if (parse_bool(value, parsed))
                 enable_ponder = parsed;
+        }
+        else if (name == "Singular Telemetry") {
+            bool parsed = false;
+            if (parse_bool(value, parsed))
+                singular_telemetry = parsed;
         }
         else if (name == "SyzygyPath") {
             syzygy_path = value == "<empty>" ? std::string{} : value;
@@ -1379,6 +1388,7 @@ struct UciSession {
             limits.depth = depth;
             limits.use_nnue = use_nnue;
             limits.contempt = contempt;
+            limits.singular_telemetry = singular_telemetry;
             limits.thread_count = sort_threads;
             limits.thread_id = 0;
             limits.report_info = true;
@@ -1564,6 +1574,7 @@ struct UciSession {
         }
 
         limits.contempt = contempt;
+        limits.singular_telemetry = singular_telemetry;
         limits.stop = &stop_requested;
         limits.pondering = &pondering;
         limits.ponder_time_offset_ms = &ponder_time_offset_ms;

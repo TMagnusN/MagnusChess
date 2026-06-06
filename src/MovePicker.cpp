@@ -71,9 +71,9 @@ MovePicker::MovePicker(
     Move tt_move,
     int ply,
     Move prev_move,
-    Move prev2_move,
-    Move prev4_move,
-    Move prev8_move,
+    ContinuationHistoryContext prev2,
+    ContinuationHistoryContext prev4,
+    ContinuationHistoryContext prev8,
     int depth,
     QuietControl quiet_control
 ) noexcept
@@ -85,9 +85,9 @@ MovePicker::MovePicker(
     , killer1_(history.killer_fast(ply, 0))
     , killer2_(history.killer_fast(ply, 1))
     , prev_move_(prev_move)
-    , prev2_move_(prev2_move)
-    , prev4_move_(prev4_move)
-    , prev8_move_(prev8_move)
+    , prev2_(prev2)
+    , prev4_(prev4)
+    , prev8_(prev8)
     , depth_(depth)
     , quiet_control_(quiet_control) {}
 
@@ -409,9 +409,9 @@ int MovePicker::score_quiet(Move move) const noexcept {
         pos_,
         move,
         prev_move_,
-        prev2_move_,
-        prev4_move_,
-        prev8_move_
+        prev2_,
+        prev4_,
+        prev8_
     );
 }
 

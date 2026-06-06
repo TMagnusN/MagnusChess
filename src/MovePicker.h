@@ -83,9 +83,9 @@ public:
         Move tt_move,
         int ply,
         Move prev_move,
-        Move prev2_move,
-        Move prev4_move,
-        Move prev8_move,
+        ContinuationHistoryContext prev2,
+        ContinuationHistoryContext prev4,
+        ContinuationHistoryContext prev8,
         int depth,
         QuietControl quiet_control = {}
     ) noexcept;
@@ -127,9 +127,9 @@ private:
     Move killer1_ = Move(0);
     Move killer2_ = Move(0);
     Move prev_move_ = Move(0);
-    Move prev2_move_ = Move(0);
-    Move prev4_move_ = Move(0);
-    Move prev8_move_ = Move(0);
+    ContinuationHistoryContext prev2_{};
+    ContinuationHistoryContext prev4_{};
+    ContinuationHistoryContext prev8_{};
     int depth_ = 0;
     QuietControl quiet_control_{};
 

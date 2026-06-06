@@ -154,6 +154,7 @@ setoption name Syzygy50MoveRule value true
   - `Clear Hash` 🧹
   - `UseNNUE` 🤖
   - `Ponder` 💭
+  - `Singular Telemetry` (TT trust, exclusion cost, and extension outcomes; default off)
   - `SyzygyPath`
   - `SyzygyProbeDepth`
   - `Syzygy50MoveRule`

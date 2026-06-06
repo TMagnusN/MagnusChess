@@ -63,7 +63,7 @@
 | `capture_value_fast(pos, move)` | 查询吃子历史分 |
 | `countermove_fast(pos, prev_move)` | 查询反走法 |
 | `countermove_bonus_fast(pos, move, prev_move)` | 反走法匹配奖励（匹配=`MAGNUS_COUNTERMOVE_BONUS=4096`） |
-| `continuation_value_fast(pos, move, prev_move)` | 查询延续历史分 |
+| `continuation_value_fast(pos, move, previous, slot)` | 按已保存的前序棋子类型与目标格查询延续历史分 |
 | `see_bias_value_fast(depth, see_value)` | 查询 SEE 偏置项（`clamp(raw/4, -96, 96)`） |
 | `pawn_history_value_fast(pos, move)` | 查询兵形历史分 |
 
@@ -71,8 +71,10 @@
 
 | 方法 | 描述 |
 |------|------|
-| `quiet_ordering_score_fast(pos, move, prev, prev2)` | 安静走法综合排序分（5 项加权和） |
+| `quiet_ordering_score_fast(pos, move, prev_move, prev2, prev4, prev8)` | 安静走法综合排序分（6 项加权和） |
 | `capture_ordering_score_fast(pos, move, depth, see)` | 吃子综合排序分（3 项加权和） |
+
+`ContinuationHistoryContext` 在走法执行前保存棋子类型与目标格。查询和更新延续历史时直接使用该快照，不从数个 ply 后的当前局面反推旧走法的棋子类型；因此即使该棋子后来移动、被吃或升变，索引仍保持稳定。
 
 #### 奖励/惩罚
 
@@ -85,7 +87,11 @@
 | `bonus_pawn_history_fast(pos, move, depth)` | 奖励兵形历史 |
 | `penalty_pawn_history_fast(pos, move, depth)` | 惩罚兵形历史 |
 
-所有更新使用指数加权移动平均：`next = clamp(current ± history_bonus/penalty(depth), -32767, 32767)`。
+所有更新使用有界重力公式：
+
+`next = current + bonus - current × abs(bonus) / limit`
+
+其中奖励传入正 `bonus`，惩罚传入负 `bonus`。越接近同方向上限，更新量越小；方向相反的新证据则会更快把历史值拉回。一般历史表的 `limit=32767`，SEE 偏置表为 `2048`。
 
 ### 兵形历史（PawnHistory）
 
@@ -165,9 +171,17 @@ The core of the history heuristic system, aggregating all sub-tables.
 
 **Query**: `killer_fast`, `quiet_value_fast`, `capture_value_fast`, `countermove_fast`, `countermove_bonus_fast`, `continuation_value_fast`, `see_bias_value_fast`, `pawn_history_value_fast`
 
-**Ordering**: `quiet_ordering_score_fast` (5-term weighted sum), `capture_ordering_score_fast` (3-term weighted sum)
+**Ordering**: `quiet_ordering_score_fast` (6-term weighted sum), `capture_ordering_score_fast` (3-term weighted sum)
+
+`ContinuationHistoryContext` snapshots the moved piece type and destination before the move is made. Continuation lookup and updates use that snapshot rather than reconstructing an old move from the current board.
 
 **Update**: `bonus_fast`/`penalty_fast` (quiets), `bonus_capture_fast`/`penalty_capture_fast` (captures), `bonus_pawn_history_fast`/`penalty_pawn_history_fast` (pawn history)
+
+All stored values use bounded gravity updates:
+
+`next = current + bonus - current * abs(bonus) / limit`
+
+Rewards pass a positive bonus and penalties pass a negative bonus. Same-direction updates shrink near the bound, while contradictory evidence moves the value back faster. The general history limit is 32767; SEE bias uses 2048.
 
 ### Pawn History
 

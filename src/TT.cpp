@@ -152,7 +152,7 @@ inline void tt_atomic_store(
 
     return current_age >= entry_age
         ? static_cast<int>(current_age - entry_age)
-        : static_cast<int>((255 - entry_age) + current_age);
+        : static_cast<int>(current_age) + 254 - static_cast<int>(entry_age);
 }
 
 } // namespace

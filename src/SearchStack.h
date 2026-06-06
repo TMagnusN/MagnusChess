@@ -24,6 +24,7 @@ SOFTWARE.
 
 #pragma once
 
+#include "HistoryContext.h"
 #include "Types.h"
 
 /*
@@ -44,10 +45,12 @@ namespace magnus::search {
 
 struct SearchStackEntry {
     Move current_move = 0;          // 當前正在搜索的著法（供歷史更新使用）
+    ContinuationHistoryContext continuation{};
     int static_eval = 0;            // 當前 ply 的靜態評估值
     int stat_score = 0;             // 綜合歷史統計分數（LMR 計算的輸出，供子節點參考）
     int reduction_fp = 0;           // LMR 的最終減免量（固定點格式，FP_ONE_PLY=1024）
                                     // 子節點用於 hindsight depth 調整
+    int extension = 0;              // Search depth added by the move at this ply.
     int move_count = 0;             // 已搜索的合法著法數量
     int cutoff_count = 0;           // 截斷次數（連續截斷會增加後續著法的 LMR 減免量）
     bool in_check = false;          // 走子方是否被將軍
