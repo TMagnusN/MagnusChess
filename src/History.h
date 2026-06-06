@@ -33,7 +33,9 @@ SOFTWARE.
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <cstdlib>
 
+#include "HistoryContext.h"
 #include "MoveGen.h"
 #include "Position.h"
 #include "Search.h"
@@ -199,6 +201,24 @@ constexpr int CONTINUATION_HISTORY_SLOTS = 3;
 constexpr int CONTINUATION_PLY2_SLOT = 0;
 constexpr int CONTINUATION_PLY4_SLOT = 1;
 constexpr int CONTINUATION_PLY8_SLOT = 2;
+constexpr i32 HISTORY_VALUE_LIMIT = 32767;
+constexpr i32 SEE_BIAS_VALUE_LIMIT = 2048;
+
+inline void update_history_value(
+    i16& value,
+    int bonus,
+    i32 limit = HISTORY_VALUE_LIMIT
+) noexcept {
+    const i32 bounded_limit = std::clamp<i32>(limit, 1, 32767);
+    const i32 bounded_bonus = std::clamp<i32>(bonus, -bounded_limit, bounded_limit);
+    const i32 current = static_cast<i32>(value);
+    const i32 gravity = (current * std::abs(bounded_bonus)) / bounded_limit;
+    value = static_cast<i16>(std::clamp(
+        current + bounded_bonus - gravity,
+        -bounded_limit,
+        bounded_limit
+    ));
+}
 
 [[nodiscard]] inline int pawn_history_index(const Position& pos) noexcept {
     const Key pawn_key =
@@ -237,7 +257,7 @@ countermove hints in one place for move ordering and light pruning signals.
  * 更新機制：
  *   bonus  — 著法導致截斷時增加權重（增量 = depth²）
  *   penalty — 被搜索但未截斷的著法減少權重（減量 = depth²×4）
- *   所有更新使用指數加權移動平均 (exponential moving average)
+ *   所有更新使用有界重力公式，越接近上限時同方向更新越小
  */
 struct HistoryTables {
     KillerTable killers{};
@@ -292,8 +312,7 @@ struct HistoryTables {
         if (!is_ok(pt))
             return;
         i16& h = pawn_history.value[idx][pt][to_sq(move)];
-        const i32 next = static_cast<i32>(h) + history_bonus(depth);
-        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+        update_history_value(h, history_bonus(depth));
     }
     inline void penalty_pawn_history_fast(const Position& pos, Move move, int depth) noexcept {
         if (move_is_capture(move))
@@ -303,8 +322,7 @@ struct HistoryTables {
         if (!is_ok(pt))
             return;
         i16& h = pawn_history.value[idx][pt][to_sq(move)];
-        const i32 next = static_cast<i32>(h) - history_penalty(depth);
-        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+        update_history_value(h, -history_penalty(depth));
     }
     [[nodiscard]] inline Move countermove_fast(
         const Position& pos,
@@ -329,29 +347,28 @@ struct HistoryTables {
     [[nodiscard]] inline i32 continuation_value_fast(
         const Position& pos,
         Move move,
-        Move prev_move,
+        ContinuationHistoryContext previous,
         int slot
     ) const noexcept {
-        if (move_is_capture(move) || move_is_none(prev_move))
+        if (move_is_capture(move) || !previous.valid())
             return 0;
 
         const Color side = static_cast<Color>(pos.side_to_move);
         const PieceType cur_piece = piece_type_on(pos, from_sq(move));
-        const PieceType prev_piece = piece_type_on(pos, to_sq(prev_move));
-        if (!is_ok(cur_piece) || !is_ok(prev_piece))
+        if (!is_ok(cur_piece))
             return 0;
 
         const int idx = std::clamp(slot, 0, CONTINUATION_HISTORY_SLOTS - 1);
         return continuation[idx]
-            .value[side][prev_piece][to_sq(prev_move)][cur_piece][to_sq(move)];
+            .value[side][previous.piece][previous.to][cur_piece][to_sq(move)];
     }
     [[nodiscard]] inline i32 quiet_ordering_score_fast(
         const Position& pos,
         Move move,
         Move prev_move,
-        Move prev2_move,
-        Move prev4_move,
-        Move prev8_move
+        ContinuationHistoryContext prev2,
+        ContinuationHistoryContext prev4,
+        ContinuationHistoryContext prev8
     ) const noexcept {
         if (move_is_capture(move))
             return 0;
@@ -361,13 +378,13 @@ struct HistoryTables {
         score += (MAGNUS_COUNTERMOVE_WEIGHT_NUM * countermove_bonus_fast(pos, move, prev_move))
             / MAGNUS_COUNTERMOVE_WEIGHT_DEN;
         score += (MAGNUS_CONT1_WEIGHT_NUM
-            * continuation_value_fast(pos, move, prev2_move, CONTINUATION_PLY2_SLOT))
+            * continuation_value_fast(pos, move, prev2, CONTINUATION_PLY2_SLOT))
             / MAGNUS_CONT1_WEIGHT_DEN;
         score += (MAGNUS_CONT2_WEIGHT_NUM
-            * continuation_value_fast(pos, move, prev4_move, CONTINUATION_PLY4_SLOT))
+            * continuation_value_fast(pos, move, prev4, CONTINUATION_PLY4_SLOT))
             / MAGNUS_CONT2_WEIGHT_DEN;
         score += (MAGNUS_CONT8_WEIGHT_NUM
-            * continuation_value_fast(pos, move, prev8_move, CONTINUATION_PLY8_SLOT))
+            * continuation_value_fast(pos, move, prev8, CONTINUATION_PLY8_SLOT))
             / MAGNUS_CONT8_WEIGHT_DEN;
         score += pawn_history_value_fast(pos, move);
         return score;
@@ -395,8 +412,7 @@ struct HistoryTables {
 
         const Color side = static_cast<Color>(pos.side_to_move);
         i16& h = quiet.value[side][from_sq(move)][to_sq(move)];
-        const i32 next = static_cast<i32>(h) + history_bonus(depth);
-        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+        update_history_value(h, history_bonus(depth));
     }
     inline void penalty_fast(const Position& pos, Move move, int depth) noexcept {
         if (move_is_capture(move))
@@ -404,8 +420,7 @@ struct HistoryTables {
 
         const Color side = static_cast<Color>(pos.side_to_move);
         i16& h = quiet.value[side][from_sq(move)][to_sq(move)];
-        const i32 next = static_cast<i32>(h) - history_penalty(depth);
-        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+        update_history_value(h, -history_penalty(depth));
     }
     inline void bonus_capture_fast(const Position& pos, Move move, int depth) noexcept {
         if (!move_is_capture(move))
@@ -415,8 +430,7 @@ struct HistoryTables {
         const PieceType mover = piece_type_on(pos, from_sq(move));
         const PieceType captured = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
         i16& h = capture.value[side][mover][to_sq(move)][captured];
-        const i32 next = static_cast<i32>(h) + history_bonus(depth);
-        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+        update_history_value(h, history_bonus(depth));
     }
     inline void penalty_capture_fast(const Position& pos, Move move, int depth) noexcept {
         if (!move_is_capture(move))
@@ -426,8 +440,7 @@ struct HistoryTables {
         const PieceType mover = piece_type_on(pos, from_sq(move));
         const PieceType captured = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
         i16& h = capture.value[side][mover][to_sq(move)][captured];
-        const i32 next = static_cast<i32>(h) - history_penalty(depth);
-        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+        update_history_value(h, -history_penalty(depth));
     }
     inline void bonus_see_bias_fast(int depth, int see_value) noexcept {
         const DepthClass dc_class = depth_class(depth);
@@ -438,8 +451,7 @@ struct HistoryTables {
         if (dc_class == DepthClass::MediumLow)
             bonus_div = MAGNUS_SEE_BIAS_MED_LOW_BONUS_DIV;
         const i32 bonus = std::max(1, history_bonus(depth) / bonus_div);
-        const i32 next = static_cast<i32>(h) + bonus;
-        h = static_cast<i16>(std::clamp(next, -2048, 2048));
+        update_history_value(h, bonus, SEE_BIAS_VALUE_LIMIT);
     }
     inline void penalty_see_bias_fast(int depth, int see_value) noexcept {
         const int dc = static_cast<int>(depth_class(depth));
@@ -449,8 +461,7 @@ struct HistoryTables {
             history_bonus(depth) / (MAGNUS_SEE_BIAS_BONUS_DIV * MAGNUS_SEE_BIAS_FAIL_SCALE);
         if (penalty <= 0)
             return;
-        const i32 next = static_cast<i32>(h) - penalty;
-        h = static_cast<i16>(std::clamp(next, -2048, 2048));
+        update_history_value(h, -penalty, SEE_BIAS_VALUE_LIMIT);
     }
     inline void set_countermove_fast(
         const Position& pos,
@@ -465,47 +476,43 @@ struct HistoryTables {
     }
     inline void bonus_continuation_fast(
         const Position& pos,
-        Move prev_move,
+        ContinuationHistoryContext previous,
         Move move,
         int depth,
         int slot
     ) noexcept {
-        if (move_is_capture(move) || move_is_none(prev_move))
+        if (move_is_capture(move) || !previous.valid())
             return;
 
         const Color side = static_cast<Color>(pos.side_to_move);
         const PieceType cur_piece = piece_type_on(pos, from_sq(move));
-        const PieceType prev_piece = piece_type_on(pos, to_sq(prev_move));
-        if (!is_ok(cur_piece) || !is_ok(prev_piece))
+        if (!is_ok(cur_piece))
             return;
 
         const int idx = std::clamp(slot, 0, CONTINUATION_HISTORY_SLOTS - 1);
         i16& h = continuation[idx]
-            .value[side][prev_piece][to_sq(prev_move)][cur_piece][to_sq(move)];
-        const i32 next = static_cast<i32>(h) + history_bonus(depth);
-        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+            .value[side][previous.piece][previous.to][cur_piece][to_sq(move)];
+        update_history_value(h, history_bonus(depth));
     }
     inline void penalty_continuation_fast(
         const Position& pos,
-        Move prev_move,
+        ContinuationHistoryContext previous,
         Move move,
         int depth,
         int slot
     ) noexcept {
-        if (move_is_capture(move) || move_is_none(prev_move))
+        if (move_is_capture(move) || !previous.valid())
             return;
 
         const Color side = static_cast<Color>(pos.side_to_move);
         const PieceType cur_piece = piece_type_on(pos, from_sq(move));
-        const PieceType prev_piece = piece_type_on(pos, to_sq(prev_move));
-        if (!is_ok(cur_piece) || !is_ok(prev_piece))
+        if (!is_ok(cur_piece))
             return;
 
         const int idx = std::clamp(slot, 0, CONTINUATION_HISTORY_SLOTS - 1);
         i16& h = continuation[idx]
-            .value[side][prev_piece][to_sq(prev_move)][cur_piece][to_sq(move)];
-        const i32 next = static_cast<i32>(h) - history_penalty(depth);
-        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+            .value[side][previous.piece][previous.to][cur_piece][to_sq(move)];
+        update_history_value(h, -history_penalty(depth));
     }
 
     inline void penalize_quiets_fast(
@@ -537,26 +544,26 @@ struct HistoryTables {
         const Move* quiets,
         int count,
         Move excluded_move,
-        Move prev2_move,
-        Move prev4_move,
-        Move prev8_move,
+        ContinuationHistoryContext prev2,
+        ContinuationHistoryContext prev4,
+        ContinuationHistoryContext prev8,
         int depth
     ) noexcept {
         for (int i = 0; i < count; ++i) {
             if (quiets[i] == excluded_move)
                 continue;
 
-            penalty_continuation_fast(pos, prev2_move, quiets[i], depth, CONTINUATION_PLY2_SLOT);
+            penalty_continuation_fast(pos, prev2, quiets[i], depth, CONTINUATION_PLY2_SLOT);
             penalty_continuation_fast(
                 pos,
-                prev4_move,
+                prev4,
                 quiets[i],
                 std::max(1, depth / 2),
                 CONTINUATION_PLY4_SLOT
             );
             penalty_continuation_fast(
                 pos,
-                prev8_move,
+                prev8,
                 quiets[i],
                 std::max(1, depth / 4),
                 CONTINUATION_PLY8_SLOT
@@ -607,9 +614,9 @@ struct HistoryTables {
         int ply,
         int capture_see_value = 0,
         Move prev_move = Move(0),
-        Move prev2_move = Move(0),
-        Move prev4_move = Move(0),
-        Move prev8_move = Move(0)
+        ContinuationHistoryContext prev2 = {},
+        ContinuationHistoryContext prev4 = {},
+        ContinuationHistoryContext prev8 = {}
     ) noexcept {
         if (move_is_capture(move)) {
             bonus_capture_fast(pos, move, depth);
@@ -625,17 +632,17 @@ struct HistoryTables {
         bonus_fast(pos, move, depth);
         bonus_pawn_history_fast(pos, move, depth);
         set_countermove_fast(pos, prev_move, move);
-        bonus_continuation_fast(pos, prev2_move, move, depth, CONTINUATION_PLY2_SLOT);
+        bonus_continuation_fast(pos, prev2, move, depth, CONTINUATION_PLY2_SLOT);
         bonus_continuation_fast(
             pos,
-            prev4_move,
+            prev4,
             move,
             std::max(1, depth / 2),
             CONTINUATION_PLY4_SLOT
         );
         bonus_continuation_fast(
             pos,
-            prev8_move,
+            prev8,
             move,
             std::max(1, depth / 4),
             CONTINUATION_PLY8_SLOT

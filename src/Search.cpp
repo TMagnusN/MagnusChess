@@ -1236,6 +1236,25 @@ struct Searcher {
         return to_sq(move) == to_sq(prev);
     }
 
+    inline void set_move_history_context(
+        const Position& pos,
+        Move move,
+        int ply
+    ) noexcept {
+        move_stack[ply] = move;
+        SearchStackEntry& entry = search_stack[ply];
+        entry.current_move = move;
+        if (move_is_none(move)) {
+            entry.continuation = {};
+            return;
+        }
+
+        const PieceType moved_piece = move_is_promotion(move)
+            ? promo_piece(move)
+            : piece_type_on(pos, from_sq(move));
+        entry.continuation = { moved_piece, to_sq(move) };
+    }
+
     [[nodiscard]] inline bool gives_check_after_move(
         const Position& pos,
         Move move
@@ -1957,6 +1976,7 @@ struct Searcher {
         const Color side = static_cast<Color>(pos.side_to_move);
         SearchStackEntry& ss = search_stack[ply];
         ss.current_move = Move(0);
+        ss.continuation = {};
         ss.static_eval = static_eval;
         ss.stat_score = 0;
         ss.reduction_fp = 0;
@@ -2035,7 +2055,7 @@ struct Searcher {
 #endif
             NullMoveState null_state;
             do_null_move(pos, null_state);
-            move_stack[ply] = Move(0);
+            set_move_history_context(pos, Move(0), ply);
 
             const int score = -pvs(
                 pos,
@@ -2137,6 +2157,7 @@ struct Searcher {
 #endif
 
                     StateInfo st;
+                    set_move_history_context(pos, move, ply);
                     make_move(pos, move, mem.tables, st);
                     memory::tt_prefetch(mem.tt, pos.key);
 
@@ -2185,9 +2206,12 @@ struct Searcher {
 #endif
 
         const Move prev_move = (ply > 0) ? move_stack[ply - 1] : Move(0);
-        const Move prev2_move = (ply > 1) ? move_stack[ply - 2] : Move(0);
-        const Move prev4_move = (ply > 3) ? move_stack[ply - 4] : Move(0);
-        const Move prev8_move = (ply > 7) ? move_stack[ply - 8] : Move(0);
+        const ContinuationHistoryContext prev2 =
+            (ply > 1) ? search_stack[ply - 2].continuation : ContinuationHistoryContext{};
+        const ContinuationHistoryContext prev4 =
+            (ply > 3) ? search_stack[ply - 4].continuation : ContinuationHistoryContext{};
+        const ContinuationHistoryContext prev8 =
+            (ply > 7) ? search_stack[ply - 8].continuation : ContinuationHistoryContext{};
         QuietControl quiet_control{};
         if (!pv_node && !checked) {
             int node_history_signal = 0;
@@ -2213,9 +2237,9 @@ struct Searcher {
             tt_move,
             ply,
             prev_move,
-            prev2_move,
-            prev4_move,
-            prev8_move,
+            prev2,
+            prev4,
+            prev8,
             search_depth,
             quiet_control
         );
@@ -2430,19 +2454,19 @@ struct Searcher {
                 ? history_tables.continuation_value_fast(
                         pos,
                         move,
-                        prev2_move,
+                        prev2,
                         CONTINUATION_PLY2_SLOT
                     )
                     + history_tables.continuation_value_fast(
                         pos,
                         move,
-                        prev4_move,
+                        prev4,
                         CONTINUATION_PLY4_SLOT
                     ) / 2
                     + history_tables.continuation_value_fast(
                         pos,
                         move,
-                        prev8_move,
+                        prev8,
                         CONTINUATION_PLY8_SLOT
                     ) / 4
                     + history_tables.pawn_history_value_fast(pos, move)
@@ -2590,19 +2614,19 @@ struct Searcher {
                 ? history_tables.continuation_value_fast(
                         pos,
                         move,
-                        prev2_move,
+                        prev2,
                         CONTINUATION_PLY2_SLOT
                     )
                     + history_tables.continuation_value_fast(
                         pos,
                         move,
-                        prev4_move,
+                        prev4,
                         CONTINUATION_PLY4_SLOT
                     ) / 2
                     + history_tables.continuation_value_fast(
                         pos,
                         move,
-                        prev8_move,
+                        prev8,
                         CONTINUATION_PLY8_SLOT
                     ) / 4
                 : 0;
@@ -2663,15 +2687,14 @@ struct Searcher {
             if (lmr_quiet_candidate || lmr_capture_candidate)
                 record_lmr_considered(lmr, quiet_move, simple_capture, pv_node);
 #endif
-            ss.current_move = move;
             ss.move_count = legal_count;
             ss.stat_score = lmr.stat_score;
             ss.reduction_fp = lmr.final_reduction_fp;
 
             StateInfo st;
+            set_move_history_context(pos, move, ply);
             make_move(pos, move, mem.tables, st);
             memory::tt_prefetch(mem.tt, pos.key);
-            move_stack[ply] = move;
 
             const int new_depth = search_depth - 1 + move_extension;
             int score = 0;
@@ -2822,9 +2845,9 @@ struct Searcher {
                         ply,
                         move_see_value,
                         prev_move,
-                        prev2_move,
-                        prev4_move,
-                        prev8_move
+                        prev2,
+                        prev4,
+                        prev8
                     );
                     // Near-miss bonus: first few quiets that almost cut get a small reward.
                     if (!move_is_capture(move) && searched_quiet_count > 1) {
@@ -2857,9 +2880,9 @@ struct Searcher {
                             searched_quiets,
                             searched_quiet_count,
                             move,
-                            prev2_move,
-                            prev4_move,
-                            prev8_move,
+                            prev2,
+                            prev4,
+                            prev8,
                             fail_low_malus_depth
                         );
                     }
@@ -2905,21 +2928,21 @@ struct Searcher {
                 history_tables.penalize_quiets_fast(pos, searched_quiets, searched_quiet_count, best_move, hist_depth);
                 history_tables.bonus_continuation_fast(
                     pos,
-                    prev2_move,
+                    prev2,
                     best_move,
                     hist_depth,
                     CONTINUATION_PLY2_SLOT
                 );
                 history_tables.bonus_continuation_fast(
                     pos,
-                    prev4_move,
+                    prev4,
                     best_move,
                     std::max(1, hist_depth / 2),
                     CONTINUATION_PLY4_SLOT
                 );
                 history_tables.bonus_continuation_fast(
                     pos,
-                    prev8_move,
+                    prev8,
                     best_move,
                     std::max(1, hist_depth / 4),
                     CONTINUATION_PLY8_SLOT
@@ -2929,9 +2952,9 @@ struct Searcher {
                     searched_quiets,
                     searched_quiet_count,
                     best_move,
-                    prev2_move,
-                    prev4_move,
-                    prev8_move,
+                    prev2,
+                    prev4,
+                    prev8,
                     hist_depth
                 );
             }
@@ -2979,9 +3002,9 @@ struct Searcher {
         Position local_root = root;
 
         StateInfo st;
+        set_move_history_context(local_root, move, 0);
         make_move(local_root, move, mem.tables, st);
         memory::tt_prefetch(mem.tt, local_root.key);
-        move_stack[0] = move;
 
         int score = 0;
         if (full_window) {
