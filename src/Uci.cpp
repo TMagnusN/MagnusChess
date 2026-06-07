@@ -951,7 +951,7 @@ struct UciSession {
     const bool is_beta = true;
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess\U0001F984 2.4.75 by the Magnus developer ";
+        out << "MagnusChess\U0001F984 2.4.102 by the Magnus developer ";
         if (is_beta) {
             out << "& This is a beta version";
         }
@@ -959,7 +959,7 @@ struct UciSession {
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess 2.4.75 ";
+        out << "id name MagnusChess 2.4.102 ";
         
         if(is_beta) {
             out << "for Beta Testing";
