@@ -165,7 +165,7 @@ setoption name Syzygy50MoveRule value true
   - nodes 🌐
   - movetime ⏲️
   - wtime / btime / inc / movestogo ♟️
-- TimeManager adapts time usage with recent-search history 📈
+- TimeManager derives soft/hard budgets from clock, increment, moves-to-go, and game ply 📈
 
 ---
 

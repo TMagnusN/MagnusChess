@@ -23,11 +23,13 @@ SOFTWARE.
 */
 
 #include "Mnue.h"
+#include "MoveGen.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -189,60 +191,8 @@ template<class Layout>
     return next;
 }
 
-inline void invalidate_p2_accumulator(Position& pos) noexcept {
-    pos.mnue_p2_acc_valid_mask = 0;
-    pos.mnue_p2_generation = g_p2_generation.load(std::memory_order_relaxed);
-}
-
 [[nodiscard]] inline std::uint8_t p2_perspective_mask(Color perspective) noexcept {
     return static_cast<std::uint8_t>(1u << static_cast<unsigned>(perspective));
-}
-
-[[nodiscard]] inline std::uint8_t p2_all_perspectives_mask() noexcept {
-    return static_cast<std::uint8_t>(
-        p2_perspective_mask(WHITE) | p2_perspective_mask(BLACK)
-    );
-}
-
-[[nodiscard]] inline bool p2_generation_matches(const Position& pos) noexcept {
-    return pos.mnue_p2_generation == g_p2_generation.load(std::memory_order_relaxed);
-}
-
-[[nodiscard]] inline bool p2_generation_matches(
-    const Position& pos,
-    u32 current_generation
-) noexcept {
-    return pos.mnue_p2_generation == current_generation;
-}
-
-inline void sync_p2_generation(const Position& pos, u32 current_generation) noexcept {
-    if (pos.mnue_p2_generation != current_generation) {
-        pos.mnue_p2_generation = current_generation;
-        pos.mnue_p2_acc_valid_mask = 0;
-    }
-}
-
-inline void invalidate_p2_perspective(Position& pos, Color perspective) noexcept {
-    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
-    sync_p2_generation(pos, current);
-    pos.mnue_p2_acc_valid_mask = static_cast<std::uint8_t>(
-        pos.mnue_p2_acc_valid_mask & ~p2_perspective_mask(perspective)
-    );
-}
-
-[[nodiscard]] inline bool p2_accumulator_matches(
-    const Position& pos,
-    Color perspective,
-    u32 current_generation
-) noexcept {
-    return p2_generation_matches(pos, current_generation)
-        && ((pos.mnue_p2_acc_valid_mask & p2_perspective_mask(perspective)) != 0);
-}
-
-[[nodiscard]] inline bool p2_accumulators_match(const Position& pos) noexcept {
-    return p2_generation_matches(pos)
-        && ((pos.mnue_p2_acc_valid_mask & p2_all_perspectives_mask())
-            == p2_all_perspectives_mask());
 }
 
 
@@ -535,22 +485,13 @@ struct P2RefreshCache {
     }
 };
 
-[[nodiscard]] P2RefreshEntry& p2_refresh_entry(
-    Color perspective,
-    int bucket,
-    u32 current_generation
-) noexcept {
-    thread_local P2RefreshCache cache{};
-    cache.sync(current_generation);
-
-    auto& entry = cache.entries[static_cast<std::size_t>(perspective)]
-                               [static_cast<std::size_t>(bucket)];
-    if (!entry.initialized)
-        entry.reset_to_biases();
-
-    return entry;
-}
-
+struct P2PerspectiveDiff {
+    std::array<std::uint16_t, 2> removed{};
+    std::array<std::uint16_t, 2> added{};
+    std::uint8_t removed_count = 0;
+    std::uint8_t added_count = 0;
+    bool refresh = false;
+};
 
 #if defined(__AVX2__)
 template<class Layout>
@@ -593,29 +534,6 @@ inline void sub_feature_vector_avx2(
     }
 }
 
-template<class Layout>
-inline void move_feature_vector_avx2(
-    std::array<i16, Layout::HiddenSize>& acc,
-    const i16* add,
-    const i16* sub
-) noexcept {
-    i16* acc_ptr = acc.data();
-    for (int i = 0; i < Layout::HiddenSize; i += 16) {
-        const __m256i a = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(acc_ptr + i)
-        );
-        const __m256i add_v = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(add + i)
-        );
-        const __m256i sub_v = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(sub + i)
-        );
-        _mm256_storeu_si256(
-            reinterpret_cast<__m256i*>(acc_ptr + i),
-            _mm256_add_epi16(a, _mm256_sub_epi16(add_v, sub_v))
-        );
-    }
-}
 #endif
 
 template<class Layout>
@@ -653,25 +571,166 @@ void sub_feature(
 #endif
 }
 
-template<class Layout>
-void move_feature(
-    Accumulator<Layout>& acc,
-    const Network<Layout>& net,
-    int add_idx,
-    int sub_idx
+void apply_p2_diff(
+    Accumulator<P2Layout>& dst,
+    const Accumulator<P2Layout>& src,
+    const P2PerspectiveDiff& diff,
+    bool forward
 ) noexcept {
-    const i16* add = net.w0.data() + static_cast<std::size_t>(add_idx) * Layout::HiddenSize;
-    const i16* sub = net.w0.data() + static_cast<std::size_t>(sub_idx) * Layout::HiddenSize;
+    const auto& added = forward ? diff.added : diff.removed;
+    const auto& removed = forward ? diff.removed : diff.added;
+    const std::uint8_t added_count = forward ? diff.added_count : diff.removed_count;
+    const std::uint8_t removed_count = forward ? diff.removed_count : diff.added_count;
+
+    const i16* add0 = added_count > 0
+        ? g_p2.w0.data() + static_cast<std::size_t>(added[0]) * P2Layout::HiddenSize
+        : nullptr;
+    const i16* add1 = added_count > 1
+        ? g_p2.w0.data() + static_cast<std::size_t>(added[1]) * P2Layout::HiddenSize
+        : nullptr;
+    const i16* sub0 = removed_count > 0
+        ? g_p2.w0.data() + static_cast<std::size_t>(removed[0]) * P2Layout::HiddenSize
+        : nullptr;
+    const i16* sub1 = removed_count > 1
+        ? g_p2.w0.data() + static_cast<std::size_t>(removed[1]) * P2Layout::HiddenSize
+        : nullptr;
+
 #if defined(__AVX2__)
-    move_feature_vector_avx2<Layout>(acc, add, sub);
-#else
-    for (int i = 0; i < Layout::HiddenSize; ++i)
-        acc[static_cast<std::size_t>(i)] = static_cast<i16>(
-            static_cast<i32>(acc[static_cast<std::size_t>(i)])
-            + static_cast<i32>(add[i])
-            - static_cast<i32>(sub[i])
+    for (int i = 0; i < P2Layout::HiddenSize; i += 16) {
+        __m256i value = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(src.data() + i)
         );
+        if (add0 != nullptr)
+            value = _mm256_add_epi16(
+                value,
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(add0 + i))
+            );
+        if (add1 != nullptr)
+            value = _mm256_add_epi16(
+                value,
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(add1 + i))
+            );
+        if (sub0 != nullptr)
+            value = _mm256_sub_epi16(
+                value,
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sub0 + i))
+            );
+        if (sub1 != nullptr)
+            value = _mm256_sub_epi16(
+                value,
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sub1 + i))
+            );
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst.data() + i), value);
+    }
+#else
+    for (int i = 0; i < P2Layout::HiddenSize; ++i) {
+        i32 value = src[static_cast<std::size_t>(i)];
+        if (add0 != nullptr) value += add0[i];
+        if (add1 != nullptr) value += add1[i];
+        if (sub0 != nullptr) value -= sub0[i];
+        if (sub1 != nullptr) value -= sub1[i];
+        dst[static_cast<std::size_t>(i)] = static_cast<i16>(value);
+    }
 #endif
+}
+
+using P2MoveDiff = std::array<P2PerspectiveDiff, COLOR_NB>;
+
+void append_p2_feature(
+    P2MoveDiff& move_diff,
+    const Position& pos,
+    Piece pc,
+    Square sq,
+    bool added
+) noexcept {
+    if (pc == PIECE_NONE || type_of(pc) == KING)
+        return;
+
+    for (int persp = WHITE; persp <= BLACK; ++persp) {
+        P2PerspectiveDiff& diff = move_diff[static_cast<std::size_t>(persp)];
+        if (diff.refresh)
+            continue;
+
+        const int idx = feature_index<P2Layout>(
+            pos,
+            static_cast<Color>(persp),
+            pc,
+            sq
+        );
+        if (idx < 0)
+            continue;
+
+        if (added) {
+            assert(diff.added_count < diff.added.size());
+            diff.added[diff.added_count++] = static_cast<std::uint16_t>(idx);
+        } else {
+            assert(diff.removed_count < diff.removed.size());
+            diff.removed[diff.removed_count++] = static_cast<std::uint16_t>(idx);
+        }
+    }
+}
+
+[[nodiscard]] P2MoveDiff make_p2_move_diff(
+    const Position& pos,
+    Move move
+) noexcept {
+    P2MoveDiff move_diff{};
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
+    const Piece moving = piece_on(pos, from);
+    assert(moving != PIECE_NONE);
+
+    const Color moving_color = color_of(moving);
+    const PieceType moving_type = type_of(moving);
+    if (moving_type == KING) {
+        const int from_bucket = king_zone16(relative_square(moving_color, from));
+        const int to_bucket = king_zone16(relative_square(moving_color, to));
+        move_diff[static_cast<std::size_t>(moving_color)].refresh =
+            from_bucket != to_bucket;
+    }
+
+    if (move_is_capture(move)) {
+        const Square captured_sq = move_is_ep(move)
+            ? static_cast<Square>(
+                static_cast<int>(to) + (moving_color == WHITE ? -8 : 8)
+            )
+            : to;
+        append_p2_feature(
+            move_diff,
+            pos,
+            piece_on(pos, captured_sq),
+            captured_sq,
+            false
+        );
+    }
+
+    append_p2_feature(move_diff, pos, moving, from, false);
+    if (move_is_promotion(move)) {
+        append_p2_feature(
+            move_diff,
+            pos,
+            make_piece(moving_color, promo_piece(move)),
+            to,
+            true
+        );
+    } else {
+        append_p2_feature(move_diff, pos, moving, to, true);
+    }
+
+    if (move_is_castle(move)) {
+        const bool king_side = move_flag(move) == MOVE_OO;
+        const Square rook_from = moving_color == WHITE
+            ? static_cast<Square>(king_side ? 7 : 0)
+            : static_cast<Square>(king_side ? 63 : 56);
+        const Square rook_to = moving_color == WHITE
+            ? static_cast<Square>(king_side ? 5 : 3)
+            : static_cast<Square>(king_side ? 61 : 59);
+        const Piece rook = make_piece(moving_color, ROOK);
+        append_p2_feature(move_diff, pos, rook, rook_from, false);
+        append_p2_feature(move_diff, pos, rook, rook_to, true);
+    }
+
+    return move_diff;
 }
 
 template<class Layout>
@@ -1042,21 +1101,22 @@ template<class Layout>
 }
 
 void refresh_p2_accumulator_from_cache(
+    P2RefreshCache& cache,
     const Position& pos,
     Color perspective,
-    u32 current_generation
+    u32 current_generation,
+    Accumulator<P2Layout>& out
 ) noexcept {
     if (!g_p2.loaded || !g_p2.valid())
         return;
 
-    sync_p2_generation(pos, current_generation);
-
+    cache.sync(current_generation);
     const int bucket = input_bucket<P2Layout>(pos, perspective);
-    P2RefreshEntry& entry = p2_refresh_entry(
-        perspective,
-        bucket,
-        current_generation
-    );
+    P2RefreshEntry& entry =
+        cache.entries[static_cast<std::size_t>(perspective)]
+                     [static_cast<std::size_t>(bucket)];
+    if (!entry.initialized)
+        entry.reset_to_biases();
 
     for (int sq_idx = 0; sq_idx < SQ_NB; ++sq_idx) {
         const Square sq = static_cast<Square>(sq_idx);
@@ -1086,109 +1146,155 @@ void refresh_p2_accumulator_from_cache(
         entry.board[static_cast<std::size_t>(sq_idx)] = new_pc;
     }
 
-    pos.mnue_p2_acc[perspective] = entry.accumulation;
-    pos.mnue_p2_acc_valid_mask = static_cast<std::uint8_t>(
-        pos.mnue_p2_acc_valid_mask | p2_perspective_mask(perspective)
-    );
-}
-
-inline void ensure_p2_accumulators(const Position& pos) noexcept {
-    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
-    if (!p2_accumulator_matches(pos, WHITE, current))
-        refresh_p2_accumulator_from_cache(pos, WHITE, current);
-    if (!p2_accumulator_matches(pos, BLACK, current))
-        refresh_p2_accumulator_from_cache(pos, BLACK, current);
-}
-
-[[nodiscard]] int eval_p2_incremental(const Position& pos) noexcept {
-    if (!g_p2.loaded || !g_p2.valid())
-        return 0;
-
-    ensure_p2_accumulators(pos);
-
-    const Color stm = static_cast<Color>(pos.side_to_move);
-    const auto& stm_acc = stm == WHITE ? pos.mnue_p2_acc[WHITE] : pos.mnue_p2_acc[BLACK];
-    const auto& nstm_acc = stm == WHITE ? pos.mnue_p2_acc[BLACK] : pos.mnue_p2_acc[WHITE];
-
-    return forward<P2Layout>(pos, g_p2, stm_acc, nstm_acc);
-}
-
-void apply_p2_piece_delta(
-    Position& pos,
-    Color color,
-    PieceType piece_type,
-    Square sq,
-    int delta
-) noexcept {
-    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
-    if (!g_p2.loaded || !g_p2.valid() || !p2_generation_matches(pos, current))
-        return;
-
-    if (piece_type == KING) {
-        invalidate_p2_perspective(pos, color);
-        return;
-    }
-
-    const Piece pc = make_piece(color, piece_type);
-    for (int persp = WHITE; persp <= BLACK; ++persp) {
-        const Color perspective = static_cast<Color>(persp);
-        if (!p2_accumulator_matches(pos, perspective, current))
-            continue;
-
-        const int bucket = input_bucket<P2Layout>(pos, perspective);
-        const int idx = feature_index<P2Layout>(perspective, bucket, pc, sq);
-        if (idx < 0)
-            continue;
-
-        if (delta > 0)
-            add_feature<P2Layout>(pos.mnue_p2_acc[persp], g_p2, idx);
-        else
-            sub_feature<P2Layout>(pos.mnue_p2_acc[persp], g_p2, idx);
-    }
-}
-
-void apply_p2_piece_move_delta(
-    Position& pos,
-    Color color,
-    PieceType piece_type,
-    Square from,
-    Square to
-) noexcept {
-    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
-    if (!g_p2.loaded || !g_p2.valid() || !p2_generation_matches(pos, current))
-        return;
-
-    if (piece_type == KING) {
-        const int from_bucket = king_zone16(relative_square(color, from));
-        const int to_bucket = king_zone16(relative_square(color, to));
-        if (from_bucket != to_bucket)
-            invalidate_p2_perspective(pos, color);
-        return;
-    }
-
-    const Piece pc = make_piece(color, piece_type);
-    for (int persp = WHITE; persp <= BLACK; ++persp) {
-        const Color perspective = static_cast<Color>(persp);
-        if (!p2_accumulator_matches(pos, perspective, current))
-            continue;
-
-        const int bucket = input_bucket<P2Layout>(pos, perspective);
-        const int sub_idx = feature_index<P2Layout>(perspective, bucket, pc, from);
-        const int add_idx = feature_index<P2Layout>(perspective, bucket, pc, to);
-
-        if (sub_idx >= 0 && add_idx >= 0) {
-            move_feature<P2Layout>(pos.mnue_p2_acc[persp], g_p2, add_idx, sub_idx);
-            continue;
-        }
-
-        if (sub_idx >= 0)
-            sub_feature<P2Layout>(pos.mnue_p2_acc[persp], g_p2, sub_idx);
-        if (add_idx >= 0)
-            add_feature<P2Layout>(pos.mnue_p2_acc[persp], g_p2, add_idx);
-    }
+    out = entry.accumulation;
 }
 
 } // namespace
+
+struct P2AccumulatorStack::Impl {
+    static constexpr std::size_t Capacity = 132;
+
+    struct alignas(64) State {
+        std::array<Accumulator<P2Layout>, COLOR_NB> accumulation{};
+        P2MoveDiff diff{};
+        std::uint8_t computed_mask = 0;
+    };
+
+    std::array<State, Capacity> states{};
+    P2RefreshCache refresh_cache{};
+    std::size_t state_count = 1;
+    u32 generation = 0;
+
+    void sync_generation() noexcept {
+        const u32 current = g_p2_generation.load(std::memory_order_acquire);
+        if (generation == current)
+            return;
+
+        for (std::size_t i = 0; i < state_count; ++i)
+            states[i].computed_mask = 0;
+        refresh_cache.sync(current);
+        generation = current;
+    }
+
+    void reset() noexcept {
+        sync_generation();
+        state_count = 1;
+        states[0].diff = {};
+        states[0].computed_mask = 0;
+    }
+
+    void push(const Position& pos, Move move) noexcept {
+        sync_generation();
+        assert(state_count < states.size());
+        if (state_count >= states.size())
+            return;
+
+        State& next = states[state_count++];
+        next.diff = make_p2_move_diff(pos, move);
+        next.computed_mask = 0;
+    }
+
+    void pop() noexcept {
+        assert(state_count > 1);
+        if (state_count > 1)
+            --state_count;
+    }
+
+    [[nodiscard]] const Accumulator<P2Layout>& ensure(
+        const Position& pos,
+        Color perspective
+    ) noexcept {
+        sync_generation();
+
+        const std::uint8_t mask = p2_perspective_mask(perspective);
+        const std::size_t current = state_count - 1;
+        if ((states[current].computed_mask & mask) != 0)
+            return states[current].accumulation[static_cast<std::size_t>(perspective)];
+
+        std::size_t boundary = current;
+        bool found_computed = false;
+        for (std::size_t i = current;; --i) {
+            if ((states[i].computed_mask & mask) != 0) {
+                boundary = i;
+                found_computed = true;
+                break;
+            }
+            if (i > 0
+                && states[i].diff[static_cast<std::size_t>(perspective)].refresh) {
+                boundary = i;
+                break;
+            }
+            if (i == 0) {
+                boundary = 0;
+                break;
+            }
+        }
+
+        if (found_computed) {
+            for (std::size_t i = boundary + 1; i <= current; ++i) {
+                apply_p2_diff(
+                    states[i].accumulation[static_cast<std::size_t>(perspective)],
+                    states[i - 1].accumulation[static_cast<std::size_t>(perspective)],
+                    states[i].diff[static_cast<std::size_t>(perspective)],
+                    true
+                );
+                states[i].computed_mask = static_cast<std::uint8_t>(
+                    states[i].computed_mask | mask
+                );
+            }
+        } else {
+            refresh_p2_accumulator_from_cache(
+                refresh_cache,
+                pos,
+                perspective,
+                generation,
+                states[current].accumulation[static_cast<std::size_t>(perspective)]
+            );
+            states[current].computed_mask = static_cast<std::uint8_t>(
+                states[current].computed_mask | mask
+            );
+
+            for (std::size_t i = current; i > boundary; --i) {
+                apply_p2_diff(
+                    states[i - 1].accumulation[static_cast<std::size_t>(perspective)],
+                    states[i].accumulation[static_cast<std::size_t>(perspective)],
+                    states[i].diff[static_cast<std::size_t>(perspective)],
+                    false
+                );
+                states[i - 1].computed_mask = static_cast<std::uint8_t>(
+                    states[i - 1].computed_mask | mask
+                );
+            }
+        }
+
+        return states[current].accumulation[static_cast<std::size_t>(perspective)];
+    }
+};
+
+P2AccumulatorStack::P2AccumulatorStack() noexcept
+    : impl_(std::make_unique<Impl>()) {
+    impl_->reset();
+}
+
+P2AccumulatorStack::~P2AccumulatorStack() = default;
+P2AccumulatorStack::P2AccumulatorStack(P2AccumulatorStack&&) noexcept = default;
+P2AccumulatorStack& P2AccumulatorStack::operator=(P2AccumulatorStack&&) noexcept = default;
+
+void P2AccumulatorStack::reset() noexcept {
+    impl_->reset();
+}
+
+void P2AccumulatorStack::push(const Position& pos, Move move) noexcept {
+    impl_->push(pos, move);
+}
+
+void P2AccumulatorStack::pop() noexcept {
+    impl_->pop();
+}
+
+std::size_t P2AccumulatorStack::size() const noexcept {
+    return impl_->state_count;
+}
 
 bool load_p2(const std::string& path) {
     const bool ok = load_network(g_p2, path);
@@ -1236,18 +1342,45 @@ const std::string& last_error() noexcept {
 }
 
 int eval_p2(const Position& pos) noexcept {
-    return eval_p2_incremental(pos);
+    struct StandaloneContext {
+        P2AccumulatorStack stack{};
+        Key key = 0;
+        bool initialized = false;
+    };
+
+    thread_local StandaloneContext context{};
+    if (!context.initialized || context.key != pos.key) {
+        context.stack.reset();
+        context.key = pos.key;
+        context.initialized = true;
+    }
+
+    return eval_p2(pos, context.stack);
+}
+
+int eval_p2(const Position& pos, P2AccumulatorStack& stack) noexcept {
+    if (!g_p2.loaded || !g_p2.valid())
+        return 0;
+
+    const auto& white_acc = stack.impl_->ensure(pos, WHITE);
+    const auto& black_acc = stack.impl_->ensure(pos, BLACK);
+    const Color stm = static_cast<Color>(pos.side_to_move);
+    const auto& stm_acc = stm == WHITE ? white_acc : black_acc;
+    const auto& nstm_acc = stm == WHITE ? black_acc : white_acc;
+    return forward<P2Layout>(pos, g_p2, stm_acc, nstm_acc);
 }
 
 int debug_eval_p2_reference(const Position& pos) noexcept {
     if (!g_p2.loaded || !g_p2.valid())
         return 0;
 
-    ensure_p2_accumulators(pos);
-
+    Accumulator<P2Layout> white_acc{};
+    Accumulator<P2Layout> black_acc{};
+    rebuild_accumulator<P2Layout>(pos, WHITE, white_acc, g_p2);
+    rebuild_accumulator<P2Layout>(pos, BLACK, black_acc, g_p2);
     const Color stm = static_cast<Color>(pos.side_to_move);
-    const auto& stm_acc = stm == WHITE ? pos.mnue_p2_acc[WHITE] : pos.mnue_p2_acc[BLACK];
-    const auto& nstm_acc = stm == WHITE ? pos.mnue_p2_acc[BLACK] : pos.mnue_p2_acc[WHITE];
+    const auto& stm_acc = stm == WHITE ? white_acc : black_acc;
+    const auto& nstm_acc = stm == WHITE ? black_acc : white_acc;
 
     return forward_reference<P2Layout>(pos, g_p2, stm_acc, nstm_acc);
 }
@@ -1326,41 +1459,9 @@ void debug_dump_p2_features(const Position& pos, std::ostream& out) {
 }
 
 
-void on_position_cleared(Position& pos) noexcept {
-    invalidate_p2_accumulator(pos);
-}
-
-void on_piece_added(
-    Position& pos,
-    Color color,
-    PieceType piece_type,
-    Square sq
-) noexcept {
-    apply_p2_piece_delta(pos, color, piece_type, sq, 1);
-}
-
-void on_piece_removed(
-    Position& pos,
-    Color color,
-    PieceType piece_type,
-    Square sq
-) noexcept {
-    apply_p2_piece_delta(pos, color, piece_type, sq, -1);
-}
-
-void on_piece_moved(
-    Position& pos,
-    Color color,
-    PieceType piece_type,
-    Square from,
-    Square to
-) noexcept {
-    apply_p2_piece_move_delta(pos, color, piece_type, from, to);
-}
-
-
 bool debug_check_p2_incremental(
     const Position& pos,
+    P2AccumulatorStack& stack,
     std::ostream& out
 ) noexcept {
     if (!g_p2.loaded || !g_p2.valid()) {
@@ -1368,11 +1469,17 @@ bool debug_check_p2_incremental(
         return false;
     }
 
-    const std::uint8_t valid_mask_before = pos.mnue_p2_acc_valid_mask;
-    const bool valid_before = p2_accumulators_match(pos);
-    const u32 generation_before = pos.mnue_p2_generation;
+    stack.impl_->sync_generation();
+    const std::size_t current = stack.impl_->state_count - 1;
+    const std::uint8_t valid_mask_before = stack.impl_->states[current].computed_mask;
+    const bool valid_before =
+        valid_mask_before
+        == static_cast<std::uint8_t>(
+            p2_perspective_mask(WHITE) | p2_perspective_mask(BLACK)
+        );
+    const u32 generation_before = stack.impl_->generation;
 
-    const int incremental = eval_p2_incremental(pos);
+    const int incremental = eval_p2(pos, stack);
 
     Accumulator<P2Layout> white_rebuild{};
     Accumulator<P2Layout> black_rebuild{};
@@ -1385,13 +1492,13 @@ bool debug_check_p2_incremental(
     const int rebuilt = forward<P2Layout>(pos, g_p2, rebuilt_stm, rebuilt_nstm);
 
     const bool white_acc_equal = std::equal(
-        pos.mnue_p2_acc[WHITE].begin(),
-        pos.mnue_p2_acc[WHITE].end(),
+        stack.impl_->states[current].accumulation[WHITE].begin(),
+        stack.impl_->states[current].accumulation[WHITE].end(),
         white_rebuild.begin()
     );
     const bool black_acc_equal = std::equal(
-        pos.mnue_p2_acc[BLACK].begin(),
-        pos.mnue_p2_acc[BLACK].end(),
+        stack.impl_->states[current].accumulation[BLACK].begin(),
+        stack.impl_->states[current].accumulation[BLACK].end(),
         black_rebuild.begin()
     );
     const bool score_equal = incremental == rebuilt;
@@ -1402,6 +1509,7 @@ bool debug_check_p2_incremental(
         << " valid_mask_before " << static_cast<int>(valid_mask_before)
         << " generation_before " << generation_before
         << " generation_current " << g_p2_generation.load(std::memory_order_relaxed)
+        << " stack_size " << stack.impl_->state_count
         << " incremental " << incremental
         << " rebuild " << rebuilt
         << " score_equal " << (score_equal ? 1 : 0)
@@ -1411,6 +1519,15 @@ bool debug_check_p2_incremental(
         << '\n';
 
     return ok;
+}
+
+bool debug_check_p2_incremental(
+    const Position& pos,
+    std::ostream& out
+) noexcept {
+    P2AccumulatorStack stack{};
+    stack.reset();
+    return debug_check_p2_incremental(pos, stack, out);
 }
 
 int search_score(int v, const Position& pos) noexcept {

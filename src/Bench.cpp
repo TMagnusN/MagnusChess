@@ -163,6 +163,32 @@ template<typename EvalFn>
     return result;
 }
 
+[[nodiscard]] EvalBenchTiming benchmark_p2_stack_batch(
+    const std::array<Position, SEARCH_BENCH_FENS.size()>& positions,
+    int iterations
+) {
+    using clock = std::chrono::steady_clock;
+
+    std::array<mnue::P2AccumulatorStack, SEARCH_BENCH_FENS.size()> stacks{};
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        stacks[i].reset();
+        (void)mnue::eval_p2(positions[i], stacks[i]);
+    }
+
+    EvalBenchTiming result;
+    result.evals = static_cast<std::size_t>(iterations) * positions.size();
+    const auto start = clock::now();
+    for (int iter = 0; iter < iterations; ++iter)
+        for (std::size_t i = 0; i < positions.size(); ++i)
+            result.checksum += static_cast<i64>(mnue::eval_p2(positions[i], stacks[i]));
+    const auto end = clock::now();
+
+    result.micros = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()
+    );
+    return result;
+}
+
 void render_eval_bench_timing(
     std::ostream& out,
     std::string_view name,
@@ -196,9 +222,13 @@ void render_eval_bench_timing(
     return true;
 }
 
-[[nodiscard]] bool check_p2_incremental(Position& pos, std::ostream& out) {
+[[nodiscard]] bool check_p2_incremental(
+    const Position& pos,
+    mnue::P2AccumulatorStack& stack,
+    std::ostream& out
+) {
     std::ostringstream check_log;
-    if (mnue::debug_check_p2_incremental(pos, check_log))
+    if (mnue::debug_check_p2_incremental(pos, stack, check_log))
         return true;
 
     out << check_log.str();
@@ -223,21 +253,24 @@ void render_eval_bench_timing(
 }
 
 [[nodiscard]] bool check_p2_move_roundtrip(
-    Position pos,
+    Position& pos,
+    mnue::P2AccumulatorStack& stack,
     const memory::Memory& mem,
     Move move,
     std::ostream& out
 ) {
-    if (!check_p2_incremental(pos, out))
+    if (!check_p2_incremental(pos, stack, out))
         return false;
 
     StateInfo st{};
+    stack.push(pos, move);
     make_move(pos, move, mem.tables, st);
-    if (!check_p2_incremental(pos, out))
+    if (!check_p2_incremental(pos, stack, out))
         return false;
 
     unmake_move(pos, move, mem.tables, st);
-    return check_p2_incremental(pos, out);
+    stack.pop();
+    return check_p2_incremental(pos, stack, out);
 }
 
 [[nodiscard]] bool check_p2_named_move(
@@ -259,7 +292,9 @@ void render_eval_bench_timing(
         return false;
     }
 
-    return check_p2_move_roundtrip(pos, mem, move, out);
+    mnue::P2AccumulatorStack stack{};
+    stack.reset();
+    return check_p2_move_roundtrip(pos, stack, mem, move, out);
 }
 
 [[nodiscard]] bool run_p2_incremental_smoke(
@@ -268,14 +303,22 @@ void render_eval_bench_timing(
     std::ostream& out
 ) {
     int checks = 0;
-    for (const Position& root : positions) {
+    for (std::size_t root_index = 0; root_index < positions.size(); ++root_index) {
+        const Position& root = positions[root_index];
         Position pos = root;
-        if (!check_p2_incremental(pos, out))
-            return false;
-        ++checks;
+        mnue::P2AccumulatorStack stack{};
+        stack.reset();
+        if ((root_index & 1u) == 0) {
+            if (!check_p2_incremental(pos, stack, out))
+                return false;
+            ++checks;
+        }
 
         u32 rng = static_cast<u32>(pos.key ^ (pos.key >> 32) ^ 0x9E3779B9u);
-        for (int step = 0; step < 8; ++step) {
+        std::array<Move, 12> moves{};
+        std::array<StateInfo, 12> states{};
+        int depth = 0;
+        for (int step = 0; step < static_cast<int>(moves.size()); ++step) {
             MoveList list{};
             generate_legal(pos, mem, list);
             if (list.size == 0)
@@ -283,9 +326,34 @@ void render_eval_bench_timing(
 
             rng = rng * 1664525u + 1013904223u;
             const Move move = list.moves[rng % static_cast<u32>(list.size)];
-            if (!check_p2_move_roundtrip(pos, mem, move, out))
+            moves[depth] = move;
+            stack.push(pos, move);
+            make_move(pos, move, mem.tables, states[depth]);
+            ++depth;
+
+            if ((step & 3) == 3) {
+                if (!check_p2_incremental(pos, stack, out))
+                    return false;
+                ++checks;
+            }
+        }
+
+        if (!check_p2_incremental(pos, stack, out))
+            return false;
+        ++checks;
+
+        while (depth > 0) {
+            --depth;
+            unmake_move(pos, moves[depth], mem.tables, states[depth]);
+            stack.pop();
+            if (!check_p2_incremental(pos, stack, out))
                 return false;
             ++checks;
+        }
+
+        if (stack.size() != 1) {
+            out << "info string p2 stack did not return to root\n";
+            return false;
         }
     }
 
@@ -315,6 +383,18 @@ void render_eval_bench_timing(
             out
         ) &&
         check_p2_named_move(
+            "1r5k/P7/8/8/8/8/8/4K3 w - - 0 1",
+            "a7b8q",
+            mem,
+            out
+        ) &&
+        check_p2_named_move(
+            "7k/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+            "e5d6",
+            mem,
+            out
+        ) &&
+        check_p2_named_move(
             "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
             "e1g1",
             mem,
@@ -324,7 +404,30 @@ void render_eval_bench_timing(
     if (!scenarios_ok)
         return false;
 
-    out << "  p2_incremental_checks " << (checks + 5) << " ok\n";
+    out << "  p2_incremental_checks " << (checks + 7) << " ok\n";
+    return true;
+}
+
+[[nodiscard]] bool check_p2_generation_reload(
+    const Position& pos,
+    std::ostream& out
+) {
+    mnue::P2AccumulatorStack stack{};
+    stack.reset();
+    if (!check_p2_incremental(pos, stack, out))
+        return false;
+
+    const std::string path = mnue::p2_path();
+    if (!mnue::load_p2(path)) {
+        out << "info string p2 generation reload failed: "
+            << mnue::last_error() << '\n';
+        return false;
+    }
+
+    if (!check_p2_incremental(pos, stack, out))
+        return false;
+
+    out << "  p2_generation_reload ok\n";
     return true;
 }
 
@@ -588,7 +691,9 @@ bool run_eval_bench(
     if (mnue_ok) {
         int mismatches = 0;
         for (const Position& pos : positions) {
-            const int fast = mnue::eval_p2(pos);
+            mnue::P2AccumulatorStack stack{};
+            stack.reset();
+            const int fast = mnue::eval_p2(pos, stack);
             const int reference = mnue::debug_eval_p2_reference(pos);
             if (fast != reference)
                 ++mismatches;
@@ -603,6 +708,8 @@ bool run_eval_bench(
             return false;
 
         if (!run_p2_incremental_smoke(positions, mem, out))
+            return false;
+        if (!check_p2_generation_reload(positions[0], out))
             return false;
     }
 
@@ -619,15 +726,9 @@ bool run_eval_bench(
     }
 
     if (mnue_ok) {
-        for (const Position& pos : positions)
-            (void)mnue::eval_p2(pos);
-
-        const EvalBenchTiming mnue_fast_timing = benchmark_eval_batch(
-            positions,
-            iterations,
-            [](const Position& pos) noexcept { return mnue::eval_p2(pos); }
-        );
-        render_eval_bench_timing(out, "mnue_p2_fast", mnue_fast_timing);
+        const EvalBenchTiming mnue_fast_timing =
+            benchmark_p2_stack_batch(positions, iterations);
+        render_eval_bench_timing(out, "mnue_p2_lazy_stack", mnue_fast_timing);
 
         const EvalBenchTiming mnue_reference_timing = benchmark_eval_batch(
             positions,

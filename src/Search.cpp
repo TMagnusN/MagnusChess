@@ -406,6 +406,7 @@ struct Searcher {
     int seldepth = 0;
     int root_side_to_move = WHITE;
     HistoryTables history_tables{};
+    mutable mnue::P2AccumulatorStack p2_accumulator_stack{};
     Move pv_table[MAX_PLY][MAX_PLY]{};
     int pv_length[MAX_PLY + 1]{};
     Key rep_keys[MAX_PLY + 1]{};
@@ -1706,9 +1707,29 @@ struct Searcher {
         return limits.use_nnue && mnue::p2_loaded();
     }
 
+    inline void make_search_move(
+        Position& pos,
+        Move move,
+        StateInfo& st
+    ) noexcept {
+        if (use_mnue())
+            p2_accumulator_stack.push(pos, move);
+        make_move(pos, move, mem.tables, st);
+    }
+
+    inline void unmake_search_move(
+        Position& pos,
+        Move move,
+        const StateInfo& st
+    ) noexcept {
+        unmake_move(pos, move, mem.tables, st);
+        if (use_mnue())
+            p2_accumulator_stack.pop();
+    }
+
     [[nodiscard]] inline int evaluate_raw_position(const Position& pos) const noexcept {
         if (use_mnue())
-            return mnue::eval_p2(pos);
+            return mnue::eval_p2(pos, p2_accumulator_stack);
         if (use_nnue())
             return nnue::eval(pos);
         return eval::evaluate(pos);
@@ -2287,11 +2308,11 @@ struct Searcher {
 #endif
 
             StateInfo st;
-            make_move(pos, move, mem.tables, st);
+            make_search_move(pos, move, st);
             memory::tt_prefetch(mem.tt, pos.key);
 
             const int score = -qsearch(pos, -beta, -alpha, ply + 1);
-            unmake_move(pos, move, mem.tables, st);
+            unmake_search_move(pos, move, st);
             if (score > alpha) {
                 alpha = score;
                 best_move = move;
@@ -2618,7 +2639,7 @@ struct Searcher {
 
                     StateInfo st;
                     set_move_history_context(pos, move, ply);
-                    make_move(pos, move, mem.tables, st);
+                    make_search_move(pos, move, st);
                     memory::tt_prefetch(mem.tt, pos.key);
 
                     int score = -qsearch(pos, -probcut_beta, -probcut_beta + 1, ply + 1);
@@ -2636,7 +2657,7 @@ struct Searcher {
                         }
                     }
 
-                    unmake_move(pos, move, mem.tables, st);
+                    unmake_search_move(pos, move, st);
 
                     if (score >= probcut_beta) {
 #if MAGNUS_SEARCH_OBS
@@ -3190,7 +3211,7 @@ struct Searcher {
             const int move_alpha_before = alpha;
             const u64 move_nodes_before = nodes;
             set_move_history_context(pos, move, ply);
-            make_move(pos, move, mem.tables, st);
+            make_search_move(pos, move, st);
             memory::tt_prefetch(mem.tt, pos.key);
 
             const int new_depth = search_depth - 1 + move_extension;
@@ -3282,7 +3303,7 @@ struct Searcher {
                 }
             }
 
-            unmake_move(pos, move, mem.tables, st);
+            unmake_search_move(pos, move, st);
 
             record_singular_outcome(
                 singular_bucket_index,
@@ -3510,7 +3531,7 @@ struct Searcher {
 
         StateInfo st;
         set_move_history_context(local_root, move, 0);
-        make_move(local_root, move, mem.tables, st);
+        make_search_move(local_root, move, st);
         memory::tt_prefetch(mem.tt, local_root.key);
 
         int score = 0;
@@ -3526,7 +3547,7 @@ struct Searcher {
             }
         }
 
-        unmake_move(local_root, move, mem.tables, st);
+        unmake_search_move(local_root, move, st);
 
         RootMoveResult result;
         result.score = score;
@@ -4213,6 +4234,7 @@ void emit_iteration_info(
     Move hint_move = 0;
     Position keyed_root = local_root;
     position_refresh_key(keyed_root, searcher.mem.tables);
+    searcher.p2_accumulator_stack.reset();
     searcher.root_side_to_move = keyed_root.side_to_move;
     searcher.start_time = search_start;
     searcher.stop_on_ponderhit = false;
@@ -4771,6 +4793,7 @@ void emit_iteration_info(
         recovery_limits.shared_tb_hits = &shared_tb_hits;
 
         Searcher recovery_searcher(mem, recovery_limits);
+        recovery_searcher.p2_accumulator_stack.reset();
         reset_searcher_iteration(
             recovery_searcher,
             timed_search ? search_start : Searcher::clock::now(),

@@ -710,7 +710,7 @@ enum class DisplayScoreModel {
     search::SearchLimits& limits
 ) noexcept {
     // Convert the UCI go command into normalized parameters, then let the time
-    // manager derive final soft/hard budgets (with historical adjustment).
+    // manager derive the final soft/hard budgets.
     std::istringstream iss{std::string(command)};
     std::string token;
 
@@ -1598,27 +1598,9 @@ struct UciSession {
         search_thread = std::thread([this, root, limits]() {
             PvTrackingStreamBuf pv_tracking_buf(std::cout.rdbuf());
             std::ostream tracked_out(&pv_tracking_buf);
-            const auto search_start = std::chrono::steady_clock::now();
-            const bool started_as_ponder = limits.ponder;
             const search::SearchResult result =
                 search::iterative_deepening(root, mem, limits, &tracked_out);
             tracked_out.flush();
-            const auto search_end = std::chrono::steady_clock::now();
-            const int wall_elapsed_ms = static_cast<int>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    search_end - search_start
-                ).count()
-            );
-            const bool ponder_was_hit =
-                !started_as_ponder || ponder_hit_received.load(std::memory_order_acquire);
-            const int record_elapsed_ms = started_as_ponder
-                ? std::max(
-                    0,
-                    wall_elapsed_ms - ponder_time_offset_ms.load(std::memory_order_acquire)
-                )
-                : wall_elapsed_ms;
-            if (ponder_was_hit)
-                time_manager.record_search(root, limits, result, record_elapsed_ms);
 
             const std::string ponder = ponder_move_from_search_result(
                 root,

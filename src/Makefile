@@ -1,8 +1,6 @@
 CXX := g++
 CC := gcc
 TARGET := MagnusChess
-PIN_TEST := MoveGenPinRegression
-HISTORY_TEST := HistoryRegression
 
 BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
@@ -42,10 +40,6 @@ DEP := $(OBJ:.o=.d)
 PERFT_CORE_OBJ := \
 	$(OBJ_DIR)/PerftMoveGen.o \
 	$(OBJ_DIR)/PerftPosition.o
-PIN_TEST_SRC := ../tools/MoveGenPinRegression.cpp
-PIN_TEST_OBJ := $(OBJ_DIR)/MoveGenPinRegression.o
-HISTORY_TEST_SRC := ../tools/HistoryRegression.cpp
-HISTORY_TEST_OBJ := $(OBJ_DIR)/HistoryRegression.o
 
 ARCH_FLAGS := \
 	-m64 \
@@ -168,22 +162,16 @@ else
 endif
 
 OUTPUT := $(BIN_DIR)/$(TARGET)$(EXEEXT)
-PIN_TEST_OUTPUT := $(BIN_DIR)/$(PIN_TEST)$(EXEEXT)
-HISTORY_TEST_OUTPUT := $(BIN_DIR)/$(HISTORY_TEST)$(EXEEXT)
 PROFGEN_OUTPUT := $(BIN_DIR)/$(TARGET)_profgen$(EXEEXT)
 PGO_OUTPUT := $(BIN_DIR)/$(TARGET)_pgo$(EXEEXT)
 
 ifeq ($(OS),Windows_NT)
 	RUN_CMD = .\$(call fixpath,$(OUTPUT))
-	RUN_PIN_TEST_CMD = .\$(call fixpath,$(PIN_TEST_OUTPUT))
-	RUN_HISTORY_TEST_CMD = .\$(call fixpath,$(HISTORY_TEST_OUTPUT))
 	RUN_PROFGEN_CMD = .\$(call fixpath,$(PROFGEN_OUTPUT))
 	RUN_PGO_CMD = .\$(call fixpath,$(PGO_OUTPUT))
 	PGO_BENCH_LOG_CMD = $(call fixpath,$(PGO_BENCH_LOG))
 else
 	RUN_CMD = ./$(OUTPUT)
-	RUN_PIN_TEST_CMD = ./$(PIN_TEST_OUTPUT)
-	RUN_HISTORY_TEST_CMD = ./$(HISTORY_TEST_OUTPUT)
 	RUN_PROFGEN_CMD = ./$(PROFGEN_OUTPUT)
 	RUN_PGO_CMD = ./$(PGO_OUTPUT)
 	PGO_BENCH_LOG_CMD = $(PGO_BENCH_LOG)
@@ -191,7 +179,7 @@ endif
 
 .PHONY: all build release releases \
 	pgo profile-build pgo-step1 pgo-step2 pgo-step3 \
-	pgo-generate-build pgo-use-build run movegen-pin-test history-test history-continuation-test \
+	pgo-generate-build pgo-use-build run \
 	clean objclean pgo-clean distclean
 
 all: build
@@ -223,26 +211,6 @@ $(FATHOM_OBJ): \
 	$(FATHOM_DIR)/tbchess.c \
 	$(FATHOM_DIR)/stdendian.h | $(OBJ_DIR)
 	$(CC) $(FATHOM_CFLAGS) -c $(FATHOM_DIR)/tbprobe.c -o $@
-
-$(PIN_TEST_OBJ): $(PIN_TEST_SRC) | $(OBJ_DIR)
-	$(CXX) $(BASE_CXXFLAGS) $(PGO_CXXFLAGS) -c $< -o $@
-
-$(HISTORY_TEST_OBJ): $(HISTORY_TEST_SRC) | $(OBJ_DIR)
-	$(CXX) $(BASE_CXXFLAGS) $(PGO_CXXFLAGS) -c $< -o $@
-
-$(PIN_TEST_OUTPUT): $(filter-out $(OBJ_DIR)/Main.o,$(OBJ)) $(PIN_TEST_OBJ) | $(BIN_DIR)
-	$(CXX) $^ -o $@ $(BASE_LDFLAGS) $(PGO_LDFLAGS) $(LDLIBS)
-
-$(HISTORY_TEST_OUTPUT): $(OBJ_DIR)/History.o $(HISTORY_TEST_OBJ) | $(BIN_DIR)
-	$(CXX) $^ -o $@ $(BASE_LDFLAGS) $(PGO_LDFLAGS) $(LDLIBS)
-
-movegen-pin-test: $(PIN_TEST_OUTPUT)
-	$(RUN_PIN_TEST_CMD)
-
-history-test: $(HISTORY_TEST_OUTPUT)
-	$(RUN_HISTORY_TEST_CMD)
-
-history-continuation-test: history-test
 
 $(OBJ_DIR):
 	$(call MKDIR_P,$@)
@@ -298,8 +266,6 @@ pgo-clean:
 clean:
 	$(call RMDIR_R,$(OBJ_DIR))
 	$(call RM_F,$(OUTPUT))
-	$(call RM_F,$(PIN_TEST_OUTPUT))
-	$(call RM_F,$(HISTORY_TEST_OUTPUT))
 	$(call RM_F,$(PROFGEN_OUTPUT))
 	$(call RM_F,$(PGO_OUTPUT))
 

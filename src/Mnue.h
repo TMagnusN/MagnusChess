@@ -24,6 +24,8 @@ SOFTWARE.
 
 #pragma once
 
+#include <cstddef>
+#include <memory>
 #include <ostream>
 #include <string>
 
@@ -66,6 +68,35 @@ struct P4Layout {
 static_assert(P2Layout::InputSize == 10240);
 static_assert(P4Layout::InputSize == 20480);
 
+class P2AccumulatorStack {
+public:
+    P2AccumulatorStack() noexcept;
+    ~P2AccumulatorStack();
+
+    P2AccumulatorStack(P2AccumulatorStack&&) noexcept;
+    P2AccumulatorStack& operator=(P2AccumulatorStack&&) noexcept;
+
+    P2AccumulatorStack(const P2AccumulatorStack&) = delete;
+    P2AccumulatorStack& operator=(const P2AccumulatorStack&) = delete;
+
+    void reset() noexcept;
+    void push(const Position& pos, Move move) noexcept;
+    void pop() noexcept;
+
+    [[nodiscard]] std::size_t size() const noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+
+    friend int eval_p2(const Position&, P2AccumulatorStack&) noexcept;
+    friend bool debug_check_p2_incremental(
+        const Position&,
+        P2AccumulatorStack&,
+        std::ostream&
+    ) noexcept;
+};
+
 bool load_p2(const std::string& path);
 bool load_p4(const std::string& path);
 void unload_p2() noexcept;
@@ -82,31 +113,23 @@ void unload_all() noexcept;
 // from selected search nodes; it is not written into TT raw eval in the first
 // integration stage.
 [[nodiscard]] int eval_p2(const Position& pos) noexcept;
+[[nodiscard]] int eval_p2(const Position& pos, P2AccumulatorStack& stack) noexcept;
 [[nodiscard]] int eval_p4_lazy(const Position& pos) noexcept;
 [[nodiscard]] int debug_eval_p2_reference(const Position& pos) noexcept;
 [[nodiscard]] bool p2_i32_forward_enabled() noexcept;
 [[nodiscard]] int p2_w1_max_abs() noexcept;
 
 
-// Debug/check helper: compares persistent P2 incremental accumulator against
-// a fresh full rebuild for the current position.
+// Debug/check helpers compare the lazy P2 stack accumulator against a fresh
+// full rebuild for the current position.
 [[nodiscard]] bool debug_check_p2_incremental(
     const Position& pos,
     std::ostream& out
 ) noexcept;
-
-
-// Incremental P2 accumulator hooks. These are called from Position mutators.
-// P2 keeps a persistent accumulator; P4 intentionally remains lazy-rebuild.
-void on_position_cleared(Position& pos) noexcept;
-void on_piece_added(Position& pos, Color color, PieceType piece_type, Square sq) noexcept;
-void on_piece_removed(Position& pos, Color color, PieceType piece_type, Square sq) noexcept;
-void on_piece_moved(
-    Position& pos,
-    Color color,
-    PieceType piece_type,
-    Square from,
-    Square to
+[[nodiscard]] bool debug_check_p2_incremental(
+    const Position& pos,
+    P2AccumulatorStack& stack,
+    std::ostream& out
 ) noexcept;
 
 // Debug helper for verifying trainer/engine feature-index alignment.
