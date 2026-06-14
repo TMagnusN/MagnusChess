@@ -2480,7 +2480,7 @@ struct Searcher {
         }
 
         if (can_prune &&
-            search_depth <= 6 &&
+            search_depth < 8 &&
             !is_mate_window(beta) &&
             static_eval - reverse_futility_margin(
                 search_depth,

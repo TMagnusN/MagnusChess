@@ -57,13 +57,13 @@ constexpr int kScale = 400;
 constexpr int kClip = 255;
 constexpr int kMnueMaterialMax = 78;
 constexpr int kMnueCpMaxRaw = 32768;
-// Calibrated so a clean one-pawn imbalance (about 80 MNUE raw units)
-// is reported near the conventional 100 cp scale.
-constexpr double kMnueCpBase = 72.0;
-constexpr double kMnueCpMaterial = 8.0;
-constexpr double kMnueCpEndgameDiscount = 4.0;
-constexpr double kMnueCpMinDenominator = 64.0;
-constexpr double kMnueCpMaxDenominator = 84.0;
+// Keep opening scores conservative: typical start-position search values of
+// 35-45 MNUE raw units should display near 20-30 cp.
+constexpr double kMnueCpBase = 144.0;
+constexpr double kMnueCpMaterial = 16.0;
+constexpr double kMnueCpEndgameDiscount = 8.0;
+constexpr double kMnueCpMinDenominator = 128.0;
+constexpr double kMnueCpMaxDenominator = 168.0;
 
 template<class Layout>
 struct Network {

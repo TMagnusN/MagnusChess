@@ -3,6 +3,7 @@ CC := gcc
 TARGET := MagnusChess
 
 BUILD_PROFILE ?= auto
+PGO ?= 0
 BUILD_DIR := build
 TARGET_TRIPLE := $(shell $(CXX) -dumpmachine)
 X86_64_TARGET := $(filter x86_64% amd64%,$(TARGET_TRIPLE))
@@ -21,7 +22,14 @@ else
   $(error Unknown BUILD_PROFILE '$(BUILD_PROFILE)'; use auto, portable64, or native64)
 endif
 
-OBJ_DIR := $(BUILD_DIR)/obj/$(EFFECTIVE_PROFILE)
+ifneq ($(PGO),0)
+  ifneq ($(PGO),1)
+    $(error Unknown PGO value '$(PGO)'; use PGO=0 or PGO=1)
+  endif
+endif
+
+OBJ_VARIANT ?= normal
+OBJ_DIR := $(BUILD_DIR)/obj/$(EFFECTIVE_PROFILE)/$(OBJ_VARIANT)
 PGO_DIR := $(BUILD_DIR)/pgo/$(EFFECTIVE_PROFILE)
 PGO_BENCH_LOG := $(PGO_DIR)/bench.log
 PGO_BENCH_ARGS ?= bench
@@ -176,6 +184,9 @@ PGO_USE_CXXFLAGS := \
 	-fprofile-correction \
 	-fno-peel-loops \
 	-fno-tracer
+PGO_USE_LDFLAGS := \
+	-fprofile-use=$(PGO_DIR) \
+	-fprofile-correction
 
 LDLIBS :=
 
@@ -204,13 +215,21 @@ OUTPUT := $(BUILD_DIR)/$(OUTPUT_BASENAME)$(EXEEXT)
 PROFGEN_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-profgen$(EXEEXT)
 PGO_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-pgo$(EXEEXT)
 
+ifeq ($(PGO),1)
+	AUTO_BUILD_TARGET := profile-build
+	FINAL_OUTPUT := $(PGO_OUTPUT)
+else
+	AUTO_BUILD_TARGET := build
+	FINAL_OUTPUT := $(OUTPUT)
+endif
+
 ifeq ($(OS),Windows_NT)
-	RUN_CMD = .\$(call fixpath,$(OUTPUT))
+	RUN_CMD = .\$(call fixpath,$(FINAL_OUTPUT))
 	RUN_PROFGEN_CMD = .\$(call fixpath,$(PROFGEN_OUTPUT))
 	RUN_PGO_CMD = .\$(call fixpath,$(PGO_OUTPUT))
 	PGO_BENCH_LOG_CMD = $(call fixpath,$(PGO_BENCH_LOG))
 else
-	RUN_CMD = ./$(OUTPUT)
+	RUN_CMD = ./$(FINAL_OUTPUT)
 	RUN_PROFGEN_CMD = ./$(PROFGEN_OUTPUT)
 	RUN_PGO_CMD = ./$(PGO_OUTPUT)
 	PGO_BENCH_LOG_CMD = $(PGO_BENCH_LOG)
@@ -222,13 +241,13 @@ endif
 	clean objclean pgo-clean distclean
 
 all: auto
-auto: build
+auto: $(AUTO_BUILD_TARGET)
 
 portable64:
-	@$(MAKE) --no-print-directory BUILD_PROFILE=portable64 build
+	@$(MAKE) --no-print-directory BUILD_PROFILE=portable64 auto
 
 native64:
-	@$(MAKE) --no-print-directory BUILD_PROFILE=native64 build
+	@$(MAKE) --no-print-directory BUILD_PROFILE=native64 auto
 
 variants: portable64 native64
 
@@ -236,12 +255,13 @@ detect:
 	@echo Compiler target : $(TARGET_TRIPLE)
 	@echo Requested profile: $(BUILD_PROFILE)
 	@echo Selected profile : $(EFFECTIVE_PROFILE)
+	@echo PGO enabled      : $(PGO)
 	@echo CPU flags        : $(ARCH_FLAGS)
-	@echo Output           : $(OUTPUT)
+	@echo Output           : $(FINAL_OUTPUT)
 
 build: $(OUTPUT)
-release: build
-releases: build
+release: auto
+releases: variants
 
 $(OUTPUT): $(OBJ)
 	$(CXX) $(OBJ) -o $@ $(BASE_LDFLAGS) $(PGO_LDFLAGS) $(LDLIBS)
@@ -284,6 +304,7 @@ pgo-generate-build: PGO_LDFLAGS = $(PGO_GENERATE_LDFLAGS)
 pgo-generate-build: $(PROFGEN_OUTPUT)
 
 pgo-use-build: PGO_CXXFLAGS = $(PGO_USE_CXXFLAGS)
+pgo-use-build: PGO_LDFLAGS = $(PGO_USE_LDFLAGS)
 pgo-use-build: $(PGO_OUTPUT)
 
 pgo: profile-build
@@ -296,20 +317,22 @@ profile-build:
 	@echo Step 3/3. Rebuilding optimized executable with PGO ($(PGO_OUTPUT)) ...
 	@$(MAKE) --no-print-directory pgo-step3
 
-pgo-step1: objclean pgo-clean
+pgo-step1:
+	@$(MAKE) --no-print-directory OBJ_VARIANT=pgo objclean
+	@$(MAKE) --no-print-directory pgo-clean
 	$(call RM_F,$(PROFGEN_OUTPUT))
 	$(call RM_F,$(PGO_OUTPUT))
-	@$(MAKE) --no-print-directory pgo-generate-build
+	@$(MAKE) --no-print-directory OBJ_VARIANT=pgo pgo-generate-build
 
 pgo-step2: | $(PGO_DIR)
-	@$(MAKE) --no-print-directory pgo-generate-build
+	@$(MAKE) --no-print-directory OBJ_VARIANT=pgo pgo-generate-build
 	$(RUN_PROFGEN_CMD) $(PGO_BENCH_ARGS) > "$(PGO_BENCH_LOG_CMD)" 2>&1
 	@echo PGO bench log written to $(PGO_BENCH_LOG)
 
 pgo-step3:
-	@$(MAKE) --no-print-directory objclean
+	@$(MAKE) --no-print-directory OBJ_VARIANT=pgo objclean
 	$(call RM_F,$(PGO_OUTPUT))
-	@$(MAKE) --no-print-directory pgo-use-build
+	@$(MAKE) --no-print-directory OBJ_VARIANT=pgo pgo-use-build
 
 .PHONY: run
 run: all

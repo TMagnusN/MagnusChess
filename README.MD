@@ -20,6 +20,8 @@ MagnusChess🦄 is a C++20 chess engine with UCI support, a classical search cor
 
 MagnusChess uses an external `.MNUE` network file for neural evaluation.
 
+The MNUE networks are trained using the [jw1912/bullet](https://github.com/jw1912/bullet) project.
+
 To keep the source repository lightweight, MNUE network files are stored separately in the MagnusMNUE repository:
 
 https://github.com/MagnusU0001F984/MagnusMNUE
@@ -230,26 +232,28 @@ Output:
 
 * `src/build/MagnusChess` 🦄
 
-### Optional PGO Flow 🔥📈
+### Automatic PGO Build 🔥📈
 
-1. Build an instrumented binary:
+Set `PGO=1` to build an instrumented executable, run the benchmark workload,
+and automatically rebuild with profile-guided optimization:
 
 ```bash
 cd src
-make pgo-generate
+make auto PGO=1 -j
+
+# The flag also works with explicit build profiles.
+make portable64 PGO=1 -j
+make native64 PGO=1 -j
 ```
 
-2. Run representative workloads to generate profile data:
+Windows with MinGW uses the same flag:
 
-```bash
-./build/MagnusChess_pgo search 20 64
+```powershell
+mingw32-make auto PGO=1 -j
 ```
 
-3. Rebuild with profile use:
-
-```bash
-make pgo-use
-```
+PGO outputs are written to `build/MagnusChess-<profile>-pgo[.exe]`. The default
+training workload is `bench`; override it with `PGO_BENCH_ARGS`, if needed.
 
 ---
 
