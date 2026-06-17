@@ -549,7 +549,7 @@ enum class DisplayScoreModel {
     }
 
     return depth > 0 &&
-           depth <= search::MAX_PLY &&
+           depth <= search::MAX_SEARCH_DEPTH &&
            thread_count > 0 &&
            thread_count <= MAX_UCI_THREADS;
 }

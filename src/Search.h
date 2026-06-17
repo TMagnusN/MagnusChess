@@ -53,10 +53,12 @@ namespace magnus::search {
 
 /*
  * 搜尋層全局常數：
- *   MAX_PLY            — 最大搜索深度（半步數），用於所有棧陣列的固定尺寸
+ *   MAX_PLY            — Stockfish-style search stack ply budget
+ *   MAX_SEARCH_DEPTH   — maximum completed root depth reported by iterative deepening
  *   MAX_GAME_HISTORY   — 最大對局歷史記錄數，用於重複局面檢測
  */
-constexpr int MAX_PLY = 128;
+constexpr int MAX_PLY = 246;
+constexpr int MAX_SEARCH_DEPTH = MAX_PLY - 1;
 constexpr int MAX_GAME_HISTORY = 128;
 
 /*
@@ -73,7 +75,7 @@ constexpr int MAX_GAME_HISTORY = 128;
  */
 struct SearchLimits {
     // --- 搜尋深度與節點限制 ---
-    int depth = MAX_PLY;                // 最大搜索深度（ply），預設為無限
+    int depth = MAX_SEARCH_DEPTH;       // 最大搜索深度（ply），預設為無限
     u64 node_limit = 0;                 // 最大節點數限制，0 表示無限制
 
     // --- 時間控制 ---

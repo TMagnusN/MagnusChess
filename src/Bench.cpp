@@ -631,7 +631,7 @@ bool run_timed_search_bench(
             << " (" << fen << ")\n";
 
         search::SearchLimits limits{};
-        limits.depth = search::MAX_PLY;
+        limits.depth = search::MAX_SEARCH_DEPTH;
         limits.soft_time_ms = movetime_ms;
         limits.hard_time_ms = movetime_ms;
         limits.use_nnue = use_nnue;

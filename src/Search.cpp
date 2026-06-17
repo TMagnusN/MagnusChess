@@ -4287,7 +4287,8 @@ void emit_iteration_info(
 #if MAGNUS_SEARCHSTATS_OBS
     u64 last_reported_nodes = 0;
 #endif
-    const int max_depth = std::max(1, searcher.limits.depth);
+    const int max_depth =
+        std::clamp(searcher.limits.depth, 1, MAX_SEARCH_DEPTH);
     IterationTimeState time_state{};
     if (searcher.limits.root_move_count > 0) {
         time_state.root_legal_count = searcher.limits.root_move_count;

@@ -77,7 +77,7 @@ bool TimeManager::build_limits(
     const GoParams& params,
     search::SearchLimits& limits
 ) noexcept {
-    limits.depth = search::MAX_PLY;
+    limits.depth = search::MAX_SEARCH_DEPTH;
     limits.node_limit = 0;
     limits.soft_time_ms = 0;
     limits.hard_time_ms = 0;
@@ -176,7 +176,7 @@ bool TimeManager::build_limits(
     }
 
     if (!limits.infinite &&
-        limits.depth == search::MAX_PLY &&
+        limits.depth == search::MAX_SEARCH_DEPTH &&
         limits.node_limit == 0 &&
         limits.soft_time_ms == 0 &&
         limits.hard_time_ms == 0) {
