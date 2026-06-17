@@ -26,6 +26,8 @@ SOFTWARE.
 
 #include <algorithm>
 
+#include "Search.h"
+
 /*
  * NMP (空步剪枝) 實作 — Null Move Pruning
  *
@@ -42,18 +44,6 @@ SOFTWARE.
  */
 namespace magnus::search {
 
-namespace {
-
-// NMP 常數 — SPSA 調參結果
-constexpr int NMP_STATIC_BASE = 160;        // 基礎評估門檻
-constexpr int NMP_STATIC_DEPTH_SLOPE = 8;   // 每層深度的門檻斜率
-constexpr int NMP_IMPROVING_MARGIN = 64;    // 改善局面時放寬門檻
-constexpr int NMP_EVAL_BUCKET = 96;         // 評估餘量分桶大小（每 96cp 增加 1 層減免）
-constexpr int NMP_MIN_REDUCTION = 2;
-constexpr int NMP_VERIFICATION_MIN_DEPTH = 16;
-constexpr int NMP_VERIFICATION_MIN_SPAN = 2;
-
-} // namespace
 
 bool nmp_disabled_for_ply(int ply, int nmp_min_ply) noexcept {
     return nmp_min_ply != 0 && ply < nmp_min_ply;

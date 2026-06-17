@@ -28,6 +28,7 @@ SOFTWARE.
 #include <array>
 #include <cmath>
 
+#include "Search.h"
 #include "TT.h"
 
 /*
@@ -56,18 +57,6 @@ namespace magnus::search {
 #endif
 
 namespace {
-
-// FP_ONE_PLY = 1024：固定點精度，1 個 ply = 1024 單位
-// 使用固定點而非浮點避免精度問題並加速計算
-constexpr int FP_ONE_PLY = 1024;
-// LMR 查表最大索引 — 對數表的預計算範圍
-constexpr int LMR_TABLE_MAX_INDEX = 64;
-constexpr double LMR_TABLE_LOG_SCALE = 2747.0 / 128.0;
-constexpr int QUIET_HISTORY_FP_DIVISOR = 12;
-constexpr int CAPTURE_HISTORY_FP_DIVISOR = 16;
-constexpr int LMR_DEEPER_RESEARCH_MARGIN = 96;
-constexpr int LMR_SHALLOWER_RESEARCH_MARGIN = 8;
-
 [[nodiscard]] const std::array<int, LMR_TABLE_MAX_INDEX + 1>& lmr_table() noexcept {
     static const std::array<int, LMR_TABLE_MAX_INDEX + 1> table = []() {
         std::array<int, LMR_TABLE_MAX_INDEX + 1> values{};
