@@ -37,6 +37,10 @@ jobs:
         run: |
           echo "uci" | timeout 5s ./build/MagnusChess-portable64 || true
 
+      - name: Perft depth 6
+        working-directory: ./src
+        run: ./build/MagnusChess-portable64 perft 6 1
+
       - name: Package binary
         run: |
           mkdir -p dist

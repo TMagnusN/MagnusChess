@@ -1122,8 +1122,14 @@ int run_bench(int argc, char** argv) {
 
     if (cfg.search) {
         if (cfg.timed_search) {
-            const std::string eval_file = default_eval_file();
-            use_nnue = ensure_nnue_loaded(eval_file, &std::cout);
+            const std::string mnue_file = default_mnue_p2_file();
+            use_nnue = ensure_mnue_p2_loaded(mnue_file, &std::cout);
+
+            if (!use_nnue) {
+                const std::string eval_file = default_eval_file();
+                use_nnue = ensure_nnue_loaded(eval_file, &std::cout);
+            }
+
             if (!use_nnue)
                 std::cout << "info string nnue unavailable, bench will use hce\n";
         }
