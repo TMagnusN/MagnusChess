@@ -41,6 +41,11 @@ SOFTWARE.
 #include <string>
 #include <vector>
 
+// Symbols provided by mnue/MnueEmbedded.S — the embedded MNUE P2 blob in .rodata.
+// Weak: resolve to nullptr when the object is not linked (e.g. non-GCC builds).
+extern "C" const char mnue_p2_embedded_data[] __attribute__((weak));
+extern "C" const char mnue_p2_embedded_end[]   __attribute__((weak));
+
 namespace magnus::mnue {
 namespace {
 
@@ -204,16 +209,14 @@ template<class Layout>
 }
 
 
+// Core parsing: reads MNUE header + payload from any std::istream.
+// `known_size` is the total byte size when available (0 = unknown).
+// Used by both file-based load_network() and embedded load_p2_embedded().
 template<class Layout>
-[[nodiscard]] bool load_network(Network<Layout>& net, const std::string& path) {
+[[nodiscard]] bool load_network_from_stream(
+    std::istream& in, Network<Layout>& net, const std::string& path,
+    std::uintmax_t known_size = 0) {
     clear_network(net);
-
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        net.error = "could not open MNUE file: " + path;
-        g_error = net.error;
-        return false;
-    }
 
     FileHeader header{};
     if (!read_exact(in, &header, 1)) {
@@ -223,9 +226,18 @@ template<class Layout>
     }
 
     if (header.magic != kMnueMagic || header.version != kMnueVersion) {
-        std::error_code ec;
-        const std::uintmax_t bytes = std::filesystem::file_size(path, ec);
-        if (!ec && bytes == payload_bytes<Layout>()) {
+        // Headerless fallback: only when size matches raw payload exactly.
+        // A file that happens to have enough bytes but is the wrong format
+        // must NOT be silently accepted.
+        if (known_size == 0) {
+            in.clear();
+            in.seekg(0, std::ios::end);
+            const auto endpos = in.tellg();
+            if (endpos >= 0)
+                known_size = static_cast<std::uintmax_t>(endpos);
+            in.seekg(0, std::ios::beg);
+        }
+        if (known_size == payload_bytes<Layout>()) {
             in.clear();
             in.seekg(0, std::ios::beg);
             if (read_network_payload(in, net)) {
@@ -234,10 +246,6 @@ template<class Layout>
                 g_error.clear();
                 return true;
             }
-
-            net.error = "truncated headerless MNUE weight file";
-            g_error = net.error;
-            return false;
         }
 
         net.error = "bad MNUE magic/version";
@@ -275,6 +283,22 @@ template<class Layout>
     net.path = path;
     g_error.clear();
     return true;
+}
+
+template<class Layout>
+[[nodiscard]] bool load_network(Network<Layout>& net, const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        net.error = "could not open MNUE file: " + path;
+        g_error = net.error;
+        return false;
+    }
+    std::error_code ec;
+    const auto file_sz = std::filesystem::file_size(path, ec);
+    return load_network_from_stream(
+        in, net, path,
+        ec ? static_cast<std::uintmax_t>(0) : file_sz
+    );
 }
 
 [[nodiscard]] inline Square flip_vertical_sq(Square sq) noexcept {
@@ -1580,6 +1604,54 @@ bool load_p2(const std::string& path) {
 
 bool load_p4(const std::string& path) {
     return load_network(g_p4, path);
+}
+
+// Load the compile-time embedded P2 network from .rodata.
+// Uses a zero-copy memory streambuf to avoid an extra 21 MB string allocation.
+bool load_p2_embedded() {
+    if (!mnue_p2_embedded_data || !mnue_p2_embedded_end) {
+        g_error = "embedded MNUE P2 not linked (missing MnueEmbedded.o)";
+        return false;
+    }
+
+    const auto begin =
+        reinterpret_cast<std::uintptr_t>(mnue_p2_embedded_data);
+    const auto end =
+        reinterpret_cast<std::uintptr_t>(mnue_p2_embedded_end);
+
+    if (end <= begin) {
+        g_error = "invalid embedded MNUE range";
+        return false;
+    }
+
+    const std::size_t size = static_cast<std::size_t>(end - begin);
+
+    struct MemBuf : std::streambuf {
+        MemBuf(const char* b, const char* e) {
+            char* gb = const_cast<char*>(b);
+            char* ge = const_cast<char*>(e);
+            setg(gb, gb, ge);
+        }
+    } buf(mnue_p2_embedded_data, mnue_p2_embedded_data + size);
+
+    std::istream stream(&buf);
+    const bool ok = load_network_from_stream(
+        stream, g_p2, "mm-b421bfeb0.MNUE",
+        static_cast<std::uintmax_t>(size)
+    );
+    if (ok)
+        (void)next_p2_generation();
+    return ok;
+}
+
+bool p2_embedded_available() noexcept {
+    if (!mnue_p2_embedded_data || !mnue_p2_embedded_end)
+        return false;
+    const auto begin =
+        reinterpret_cast<std::uintptr_t>(mnue_p2_embedded_data);
+    const auto end =
+        reinterpret_cast<std::uintptr_t>(mnue_p2_embedded_end);
+    return end > begin;
 }
 
 void unload_p2() noexcept {

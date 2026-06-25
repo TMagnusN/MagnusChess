@@ -72,7 +72,11 @@ SRC := \
 FATHOM_DIR := ../third_party/fathom
 FATHOM_OBJ := $(OBJ_DIR)/FathomTbProbe.o
 
-OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(SRC)) $(FATHOM_OBJ)
+# Embedded network object — compiled separately without LTO / PGO to keep
+# the 21 MB incbin isolated from instrumentation and whole-program analysis.
+MNUE_EMBEDDED_OBJ := $(OBJ_DIR)/mnue/MnueEmbedded.o
+
+OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(SRC)) $(FATHOM_OBJ) $(MNUE_EMBEDDED_OBJ)
 DEP := $(OBJ:.o=.d)
 MODULE_OBJ_DIRS := \
 	$(OBJ_DIR)/board \
@@ -302,6 +306,17 @@ $(FATHOM_OBJ): \
 	$(FATHOM_DIR)/tbchess.c \
 	$(FATHOM_DIR)/stdendian.h | $(OBJ_DIR)
 	$(CC) $(FATHOM_CFLAGS) -c $(FATHOM_DIR)/tbprobe.c -o $@
+
+# === Embedded network (separate .S — no LTO, no PGO) ===
+# The incbin source is a raw 21 MB MNUE file.  We compile it as a standalone
+# assembly object so that -fprofile-generate, -flto, and whole-program analysis
+# never touch this blob.
+$(MNUE_EMBEDDED_OBJ): mnue/MnueEmbedded.S build/mm-b421bfeb0.MNUE | $(OBJ_DIR)/mnue
+	$(CC) -x assembler-with-cpp -std=gnu99 -m64 -O2 \
+		-I. \
+		-c $< -o $@
+
+$(OBJ_DIR)/mnue/Mnue.o: build/mm-b421bfeb0.MNUE
 
 $(OBJ_DIR):
 	$(call MKDIR_P,$@)

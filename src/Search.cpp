@@ -2626,7 +2626,6 @@ struct Searcher {
     [[nodiscard]] int qsearch(Position& pos, int alpha, int beta, int ply) noexcept {
         // Quiescence search extends only tactical continuations (or all legal
         // evasions when in check) so the engine does not stand pat in unstable positions.
-        pv_length[ply] = 0;
         rep_keys[ply] = pos.key;
         update_seldepth(ply);
         ++nodes;
@@ -2648,6 +2647,8 @@ struct Searcher {
 
         const int alpha0 = alpha;
         const bool pv_node = (beta - alpha) > 1;
+        if (pv_node)
+            pv_length[ply] = 0;
         const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
         if (is_repetition_draw(pos, ply))
             return repetition_score(pos.side_to_move, tt_raw_eval_from_probe(probe));
@@ -2773,7 +2774,6 @@ struct Searcher {
         // - first move gets a full window
         // - later moves get a null window first
         // - promising moves are re-searched on a wider window
-        pv_length[ply] = 0;
         rep_keys[ply] = pos.key;
         update_seldepth(ply);
 
@@ -2802,6 +2802,8 @@ struct Searcher {
 
         const int alpha0 = alpha;
         const bool pv_node = (beta - alpha) > 1;
+        if (pv_node)
+            pv_length[ply] = 0;
         const bool exclusion_search = !move_is_none(excluded_move);
         const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
         if (is_repetition_draw(pos, ply))
@@ -4729,7 +4731,8 @@ void emit_iteration_info(
     const int hashfull = memory::tt_hashfull(local_mem.tt);
 
     stream << "info depth " << depth
-           << " seldepth " << current.seldepth << ' ';
+           << " seldepth " << current.seldepth
+           << " multipv 1 ";
     append_uci_score(
         stream,
         current.score,
@@ -5322,6 +5325,7 @@ void emit_iteration_info(
                << " tbhits " << tb_hits
                << " hashfull " << hashfull
                << " time " << time_ms
+               << " multipv 1"
                << " pv";
 
         for (int i = 0; i < result.pv_length; ++i)

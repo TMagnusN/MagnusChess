@@ -102,6 +102,8 @@ private:
 };
 
 bool load_p2(const std::string& path);
+bool load_p2_embedded();
+bool p2_embedded_available() noexcept;
 bool load_p4(const std::string& path);
 void unload_p2() noexcept;
 void unload_p4() noexcept;

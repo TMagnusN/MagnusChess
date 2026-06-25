@@ -228,37 +228,35 @@ struct TTBenchProbeResult {
     return false;
 }
 
-[[nodiscard]] std::string default_mnue_p2_file() {
-    constexpr const char* candidates[] = {
-        "b7a644d5d.MNUE",
-        "build/b7a644d5d.MNUE",
-        "src/build/b7a644d5d.MNUE"
-    };
-
-    std::error_code ec;
-    for (const char* candidate : candidates) {
-        if (std::filesystem::exists(candidate, ec) && !ec)
-            return std::string(candidate);
-    }
-
-    return std::string("b7a644d5d.MNUE");
-}
-
 [[nodiscard]] bool ensure_mnue_p2_loaded(
     const std::string& eval_file,
     std::ostream* out
 ) {
-    if (mnue::p2_loaded() && mnue::p2_path() == eval_file)
-        return true;
+    // External file explicitly requested.
+    if (!eval_file.empty()) {
+        if (mnue::p2_loaded() && mnue::p2_path() == eval_file)
+            return true;
 
-    if (mnue::load_p2(eval_file)) {
+        if (mnue::load_p2(eval_file)) {
+            if (out)
+                *out << "info string loaded mnue p2 " << eval_file << '\n';
+            return true;
+        }
+
         if (out)
-            *out << "info string loaded mnue p2 " << eval_file << '\n';
+            *out << "info string failed to load mnue p2: " << mnue::last_error() << '\n';
+        return false;
+    }
+
+    // Default: compile-time embedded P2 network.
+    if (mnue::p2_embedded_available() && mnue::load_p2_embedded()) {
+        if (out)
+            *out << "info string loaded embedded mnue p2\n";
         return true;
     }
 
     if (out)
-        *out << "info string failed to load mnue p2: " << mnue::last_error() << '\n';
+        *out << "info string no MNUE network available\n";
     return false;
 }
 
@@ -1035,7 +1033,7 @@ bool run_eval_bench(
     const std::string nnue_file = default_eval_file();
     const bool nnue_ok = ensure_nnue_loaded(nnue_file, &out);
 
-    const std::string mnue_file = default_mnue_p2_file();
+    const std::string mnue_file{}; // use embedded
     const bool mnue_ok = ensure_mnue_p2_loaded(mnue_file, &out);
     const bool mnue_v2_ok = mnue::v2::loaded();
 
@@ -1329,7 +1327,7 @@ int run_bench(int argc, char** argv) {
 
     if (cfg.search) {
         if (cfg.timed_search || compact_bench) {
-            const std::string mnue_file = default_mnue_p2_file();
+            const std::string mnue_file{}; // use embedded
             use_nnue = ensure_mnue_p2_loaded(mnue_file, &std::cout);
 
             if (!use_nnue) {

@@ -102,10 +102,6 @@ constexpr int DEFAULT_UCI_CONTEMPT = 0;
 constexpr int MIN_UCI_CONTEMPT = -10000;
 constexpr int MAX_UCI_CONTEMPT = 10000;
 
-static std::string default_mnue_p2_file() {
-    return "mm-b421bfeb0.MNUE";
-}
-
 [[nodiscard]] const std::string& get_executable_dir() {
     static const std::string dir = []() -> std::string {
 #ifdef _WIN32
@@ -1273,7 +1269,7 @@ struct UciSession {
     int syzygy_probe_limit = syzygy::DEFAULT_PROBE_LIMIT;
     bool syzygy_50_move_rule = true;
     std::string eval_file = default_eval_file();
-    std::string eval_file_p2 = default_mnue_p2_file();
+    std::string eval_file_p2{}; // empty → use embedded
     std::string syzygy_path{};
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> search_running{false};
@@ -1409,7 +1405,7 @@ struct UciSession {
             << syzygy::DEFAULT_PROBE_LIMIT
             << " min " << syzygy::MIN_PROBE_LIMIT
             << " max " << syzygy::MAX_PROBE_LIMIT << "\n";
-        out << "option name MNUEfile type string default " << eval_file_p2 << '\n';
+        out << "option name MNUEfile type string default mm-b421bfeb0.MNUE\n";
         out << "uciok" << std::endl;
     }
 
@@ -1462,46 +1458,56 @@ struct UciSession {
 
 
     [[nodiscard]] bool ensure_mnue_loaded(std::ostream* out) {
-        if (eval_file_p2.empty())
-            return false;
-
         // If v2 was loaded manually via mnuev2load, keep it.
         if (mnue::v2::loaded())
             return true;
 
-        const std::string p2_resolved = resolve_file_path(eval_file_p2);
+        // External file explicitly set by user — load from disk.
+        if (!eval_file_p2.empty()) {
+            const std::string p2_resolved = resolve_file_path(eval_file_p2);
 
-        if (mnue::v2::loaded() && mnue::v2::path() == p2_resolved)
-            return true;
-        if (mnue::p2_loaded() && mnue::p2_path() == p2_resolved)
-            return true;
+            if (mnue::p2_loaded() && mnue::p2_path() == p2_resolved)
+                return true;
 
-        if (is_mnue_v2_file(p2_resolved)) {
-            if (!mnue::v2::load(p2_resolved)) {
+            if (is_mnue_v2_file(p2_resolved)) {
+                if (!mnue::v2::load(p2_resolved)) {
+                    if (out)
+                        *out << "info string failed to load mnue v2: "
+                            << mnue::v2::last_error() << '\n';
+                    return false;
+                }
+                mnue::unload_p2();
                 if (out)
-                    *out << "info string failed to load mnue v2: "
-                        << mnue::v2::last_error() << '\n';
-                return false;
+                    mnue::v2::debug_dump_network(*out);
+                return true;
             }
-            mnue::unload_p2();
-            if (out)
-                mnue::v2::debug_dump_network(*out);
-            return true;
-        }
 
-        if (!mnue::load_p2(p2_resolved)) {
+            if (mnue::load_p2(p2_resolved)) {
+                mnue::v2::unload();
+                if (out)
+                    *out << "info string loaded mnue " << p2_resolved << '\n';
+                return true;
+            }
+
             if (out)
-                *out << "info string failed to load legacy mnue: "
+                *out << "info string failed to load mnue: "
                      << mnue::last_error() << '\n';
             return false;
         }
-        mnue::v2::unload();
+
+        // Default: compile-time embedded P2 network.
+        if (mnue::p2_loaded() && mnue::p2_path() == "mm-b421bfeb0.MNUE")
+            return true;
+
+        if (mnue::p2_embedded_available() && mnue::load_p2_embedded()) {
+            if (out)
+                *out << "info string loaded embedded mnue p2\n";
+            return true;
+        }
 
         if (out)
-            *out << "info string loaded legacy mnue "
-                << p2_resolved << '\n';
-
-        return true;
+            *out << "info string no MNUE network available\n";
+        return false;
     }
 
     [[nodiscard]] bool ensure_eval_loaded(std::ostream* out) {
@@ -1645,19 +1651,27 @@ struct UciSession {
             }
         }
         else if (name == "MNUEfile") {
-            if (!value.empty()) {
-                const std::string resolved = resolve_file_path(value);
-                std::error_code ec;
-                if (!std::filesystem::exists(resolved, ec) || ec) {
-                    out << "info string MNUEfile not found: " << value << '\n';
-                    return;
-                }
-                eval_file_p2 = resolved;
+            // "<embedded>" or empty → revert to built-in network.
+            if (value.empty() || value == "<embedded>") {
+                eval_file_p2.clear();
+                mnue::v2::unload();
+                mnue::unload_p2();
                 memory::memory_clear_hash(mem);
-
                 if (use_nnue && !ensure_eval_loaded(&out))
                     out << "info string eval unavailable, search will fall back to hce\n";
+                return;
             }
+            const std::string resolved = resolve_file_path(value);
+            std::error_code ec;
+            if (!std::filesystem::exists(resolved, ec) || ec) {
+                out << "info string MNUEfile not found: " << value << '\n';
+                return;
+            }
+            eval_file_p2 = resolved;
+            memory::memory_clear_hash(mem);
+
+            if (use_nnue && !ensure_eval_loaded(&out))
+                out << "info string eval unavailable, search will fall back to hce\n";
         }
     }
 
