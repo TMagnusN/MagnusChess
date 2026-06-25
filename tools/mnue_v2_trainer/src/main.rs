@@ -104,23 +104,6 @@ fn main() {
         print_model_summary();
     }
 
-    let diagnostic_limit = if cli.date == 0 && !cli.dry_run {
-        100_000
-    } else {
-        cli.date
-    };
-    if diagnostic_limit != cli.date {
-        println!(
-            "Diagnostic inspection prefix: {}",
-            format_number(diagnostic_limit)
-        );
-    }
-    let inspect_config = DatasetConfig {
-        paths: cli.data.clone(),
-        accepted_limit: diagnostic_limit,
-        wdl_blend: 0.75,
-        score_scale: SCORE_SCALE as f32,
-    };
     let mut samples = Vec::new();
     let retained_samples = if cli.dry_run {
         if cli.date == 0 {
@@ -130,6 +113,12 @@ fn main() {
         }
     } else {
         16
+    };
+    let inspect_config = DatasetConfig {
+        paths: cli.data.clone(),
+        accepted_limit: retained_samples as u64,
+        wdl_blend: 0.75,
+        score_scale: SCORE_SCALE as f32,
     };
     let stats = read_samples(&inspect_config, |sample| {
         if samples.len() < retained_samples {
@@ -141,11 +130,13 @@ fn main() {
         eprintln!("dataset error: {e}");
         std::process::exit(1);
     });
-    stats.print((
-        POSITION_FEATURE_COUNT,
-        ATTACK_FEATURE_COUNT,
-        STRUCTURE_FEATURE_COUNT,
-    ));
+    if cli.dry_run {
+        stats.print((
+            POSITION_FEATURE_COUNT,
+            ATTACK_FEATURE_COUNT,
+            STRUCTURE_FEATURE_COUNT,
+        ));
+    }
     if samples.is_empty() {
         eprintln!("no accepted valid positions");
         std::process::exit(1);

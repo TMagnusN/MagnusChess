@@ -103,7 +103,7 @@ constexpr int MIN_UCI_CONTEMPT = -10000;
 constexpr int MAX_UCI_CONTEMPT = 10000;
 
 static std::string default_mnue_p2_file() {
-    return "b7a644d5d.MNUE";
+    return "mm-b421bfeb0.MNUE";
 }
 
 [[nodiscard]] const std::string& get_executable_dir() {
@@ -1362,7 +1362,7 @@ struct UciSession {
     const bool is_beta = true;
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess 3.5.111 by the Magnus developer ";
+        out << "MagnusChess 4.5.127 by the Magnus developer ";
         if (is_beta) {
             out << "& This is a beta version";
         }
@@ -1370,7 +1370,7 @@ struct UciSession {
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess3.5.111";
+        out << "id name MagnusChess4.5.127";
         
         if(is_beta) {
             out << "-dev";
@@ -1464,6 +1464,10 @@ struct UciSession {
     [[nodiscard]] bool ensure_mnue_loaded(std::ostream* out) {
         if (eval_file_p2.empty())
             return false;
+
+        // If v2 was loaded manually via mnuev2load, keep it.
+        if (mnue::v2::loaded())
+            return true;
 
         const std::string p2_resolved = resolve_file_path(eval_file_p2);
 
@@ -2246,6 +2250,7 @@ struct UciSession {
             const std::string resolved = resolve_file_path(path);
             if (mnue::v2::load(resolved)) {
                 mnue::unload_p2();
+                eval_file_p2 = resolved;
                 memory::memory_clear_hash(mem);
                 mnue::v2::debug_dump_network(out);
             } else {
