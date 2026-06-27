@@ -2897,10 +2897,27 @@ struct Searcher {
         ss.tt_hit = probe.hit;
         ss.tt_pv = pv_node;
 
+        // Conservative TT-estimated razoring:
+        // use TT score only when its bound is directionally useful.
+        // Keep the old depth cap and qsearch verification.
+
+        int razor_eval = static_eval;
+        if (probe.hit && !checked && !exclusion_search &&
+            is_valid_score(probed_tt_score)) {
+            if ((tt_bound == memory::BOUND_EXACT) ||
+                (tt_bound == memory::BOUND_UPPER &&
+                 probed_tt_score < static_eval) ||
+                (tt_bound == memory::BOUND_LOWER &&
+                 probed_tt_score > static_eval)) {
+                razor_eval = probed_tt_score;
+            }
+        }
+
+        // RAZOR_MARGIN[...] is only accessed after depth <= 2 is confirmed
+        // through short-circuit evaluation.
         if (can_prune &&
             search_depth <= 2 &&
-            static_eval + RAZOR_MARGIN[search_depth] <= alpha) {
-            // Razoring: at very shallow depth, a bad static eval can defer to qsearch.
+            razor_eval + RAZOR_MARGIN[search_depth] <= alpha) {
             const int score = qsearch(pos, alpha, beta, ply);
             if (score <= alpha)
                 return score;

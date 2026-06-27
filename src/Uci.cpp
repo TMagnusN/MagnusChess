@@ -1358,7 +1358,7 @@ struct UciSession {
     const bool is_beta = true;
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess 4.5.132 by the T. Magnus";
+        out << "MagnusChess 4.5.132 by the Theodore Magnus Øen Nidhar";
         out << std::endl;
     }
 
@@ -1371,7 +1371,7 @@ struct UciSession {
         
         out << '\n';
 
-        out << "id author T. Magnus\n";
+        out << "id author Theodore Magnus Øen Nidhar\n";
         out << "option name Hash type spin default " << DEFAULT_UCI_HASH_MB
             << " min 1 max 1048576\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
