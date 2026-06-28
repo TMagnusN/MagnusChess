@@ -1,136 +1,138 @@
-# MagnusChess🦄♟️✨
+# MagnusChess
 
-MagnusChess🦄 is a C++20 chess engine with UCI support, a classical search core, optional NNUE evaluation, and built-in bench / perft / divide tooling for validation, debugging, and performance checks. 🚀
+<p align="center">
+  <img src="logo.png" alt="MagnusChess logo" width="220">
+</p>
 
-![C++20][cpp20-badge]
-![UCI][uci-badge]
-![NNUE optional][nnue-badge]
-![LGBTQ+ friendly][lgbtqp-badge]
-![trans rights][trans-rights-badge]
+<p align="center">
+  <img alt="C++20" src="https://img.shields.io/badge/C%2B%2B-20-blue">
+  <img alt="UCI supported" src="https://img.shields.io/badge/UCI-supported-brightgreen">
+  <img alt="MNUE embedded" src="https://img.shields.io/badge/MNUE-embedded-purple">
+  <img alt="Syzygy supported" src="https://img.shields.io/badge/Syzygy-supported-informational">
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-lightgrey">
+</p>
 
-[cpp20-badge]: https://img.shields.io/badge/C%2B%2B-20-blue
-[uci-badge]: https://img.shields.io/badge/UCI-supported-brightgreen
-[nnue-badge]: https://img.shields.io/badge/NNUE-optional-purple
-[lgbtqp-badge]: https://pride-badges.pony.workers.dev/static/v1?label=lgbtq%2B%20friendly&stripeWidth=6&stripeColors=E40303,FF8C00,FFED00,008026,24408E,732982
-[trans-rights-badge]: https://pride-badges.pony.workers.dev/static/v1?label=trans%20rights&stripeWidth=6&stripeColors=5BCEFA,F5A9B8,FFFFFF,F5A9B8,5BCEFA
+MagnusChess is a C++20 UCI chess engine focused on practical playing strength,
+reproducible testing, and a conventional high-performance search architecture.
 
----
+## Project Scope
 
-## MNUE Network
+- UCI-compatible chess engine for GUIs, tournament managers, and automated
+  testing.
+- Classical alpha-beta search core with iterative deepening, transposition
+  table support, move ordering, pruning, reductions, and quiescence search.
+- Neural evaluation support through MNUE files, including an embedded default
+  MNUE P2 network in the standard build.
+- Optional Syzygy tablebase probing through the vendored Fathom backend.
+- Built-in validation and benchmark commands for perft, divide, search bench,
+  evaluation bench, and transposition-table bench.
 
-MagnusChess uses an external `.MNUE` network file for neural evaluation.
+## Major Version Strength Comparison
 
-The MNUE networks are trained using the [jw1912/bullet](https://github.com/jw1912/bullet) project.
+The table below uses the test records supplied with the release notes. These
+rows are not one unified rating list. Each Elo number is relative to the listed
+opponent, anchor, or direct predecessor test under the stated conditions.
 
-To keep the source repository lightweight, MNUE network files are stored separately in the MagnusMNUE repository:
+| Release | Comparison | Time Control and Conditions | Games | Result From MagnusChess Perspective | Elo Result | LOS / Draw Ratio | Interpretation |
+|---|---|---|---:|---|---:|---|---|
+| MagnusChess 1.3.75 | vs Cheese 2.1, listed as 2805 CCRL Blitz | STC 8+0.08 | 1000 | 625W / 317D / 58L, 78.4% | +223.4 +/- 19.1 vs Cheese | LOS 100.0% / 31.7% | Approximately 3028 by this external blitz anchor if Cheese is treated as 2805. |
+| [MagnusChess 2.4.102](https://github.com/TMagnusN/MagnusChess/releases/tag/2.4.102) | vs Wahoo v4.0.0 x86_64-v3, listed as CCRL 3058 +/- 9 | STC 8+0.08, 1 thread, 32 MB hash, 5-man Syzygy, `UHO_4060_v4.epd` | 9679 | 3162W / 4013D / 2504L, 53.4% | +23.70 +/- 5.30 | LOS 100.0% / 41.5% | Approximately 3082 by this external anchor. |
+| [MagnusChess 2.4.102](https://github.com/TMagnusN/MagnusChess/releases/tag/2.4.102) | vs MagnusChess 1.3.75 | STC 8+0.08, 1 thread, 32 MB hash, `UHO_4060_v4.epd` | 3500 | 1002W / 1996D / 502L, 57.1% | +50.00 +/- 7.50 | LOS 100.0% / 57.0% | Direct short-time-control generation gain over 1.3.75. |
+| [MagnusChess 2.4.102](https://github.com/TMagnusN/MagnusChess/releases/tag/2.4.102) | vs MagnusChess 1.3.75 | LTC 30+0.3, 1 thread, 256 MB hash, `UHO_4060_v4.epd` | 356 | 89W / 215D / 52L, 55.2% | +36.20 +/- 22.60 | LOS 99.9% / 60.4% | Longer-time-control confirmation with a smaller sample. |
+| [MagnusChess 3.5.121](https://github.com/TMagnusN/MagnusChess/releases/tag/3.5.121) | v3.5.111 test build vs Ice4 v6.1 | STC 10+0.1, 1 thread, 128 MB hash, `UHO_4060_v4.epd` | 1151 | 454W / 444D / 253L, 58.7% | +61.30 +/- 15.80 | LOS 100.0% / 38.6% | Ice4 was used as the external anchor because direct tests against much older MagnusChess versions had become statistically less informative. |
+| [MagnusChess 4.5.132](https://github.com/TMagnusN/MagnusChess/releases/tag/4.5.132) | Published STC release result; opponent not named in the supplied excerpt | STC 10+0.1, 1 thread, 128 MB hash, `UHO_4060_v4.epd` | 2095 | 634W / 1209D / 252L, 59.1% | +64.10 +/- 9.60 | LOS 100.0% / 57.7% | Release note records entry into the 3300 Elo class. |
+| MagnusChess 5.6.132-dev | vs Avalanche 2.1.0, approximately 3400 CCRL Blitz anchor | STC 10+0.1, 1 thread, 128 MB hash, `UHO_4060_v4.epd` | 2145 | 520W / 861D / 764L, 44.3% | -39.7 +/- 11.4 vs Avalanche | LOS 0.0% / 40.1% | Approximately 3360 by this external blitz anchor. |
+| MagnusChess 5.6.132-dev | vs MagnusChess 4.5.132-dev | STC 10+0.1, 1 thread, 128 MB hash, `UHO_4060_v4.epd` | 1163 | 239W / 748D / 176L, 52.7% | +18.8 +/- 11.9 | LOS 99.9% / 64.3% | Direct generation gain over 4.5.132-dev. |
 
-https://github.com/MagnusU0001F984/MagnusMNUE
+## Technical Overview
 
-Download the desired `.MNUE` file from that repository and place it next to the MagnusChess executable, for example:
+### Board and State
+
+- Bitboard-based position representation.
+- Incremental state maintenance for keys, evaluation-related state, king
+  squares, and search history.
+- Core board implementation in `src/board/Attack.*`, `src/board/MoveGen.*`,
+  and `src/board/Position.*`.
+
+### Search
+
+- Iterative deepening.
+- Principal Variation Search.
+- Quiescence search.
+- Aspiration windows with widening fallback.
+- Transposition table cutoffs with bound-aware storage.
+- Internal iterative reductions.
+- Razoring, reverse futility pruning, null-move pruning, futility pruning, late
+  move pruning, history pruning, and late move reductions.
+- UCI `info` output with depth, selective depth, score, nodes, NPS, hashfull,
+  tablebase hits, principal variation, and optional telemetry.
+
+### Move Ordering
+
+- Staged move picker:
+  `TT move -> good captures -> killer moves -> quiets -> bad captures`.
+- Quiet move signals:
+  quiet history, countermove history, and continuation history.
+- Capture signals:
+  capture history, static exchange evaluation, SEE bias, and MVV-LVA support.
+
+### Transposition Table
+
+- Clustered transposition table layout.
+- Probe, save, and prefetch support.
+- Replacement policy based on depth, age, bound type, and PV status.
+- Sampled `hashfull` reporting for UCI output.
+
+### Evaluation
+
+- Hand-crafted evaluation fallback with tapered middle-game and end-game terms.
+- MNUE P2 evaluation with a standard embedded network in the build.
+- MNUE X1 and MNUEv2 development loaders and diagnostics.
+- Legacy NNUE fallback path where supported by the build.
+- If no neural evaluator is available, search falls back to HCE.
+
+## MNUE Networks
+
+The standard build embeds the MNUE P2 file named in `src/Makefile`:
 
 ```text
-MagnusChess.exe
-b7a644d5d.MNUE
-````
+MNUE_EMBEDDED_FILE := mm-8adbe41d1.MNUE
+```
 
-You can also specify a custom network path through UCI:
+The build expects this file to exist under `src/build/` so it can be included
+through `src/mnue/MnueEmbedded.S`.
+
+An external MNUE file can be selected through UCI:
 
 ```text
 setoption name MNUEfile value path/to/network.MNUE
 ```
 
-If no valid MNUE file is found, MagnusChess may fall back to non-MNUE evaluation or report that the network file could not be loaded.
+Use the embedded network again with:
 
----
+```text
+setoption name MNUEfile value <embedded>
+```
 
-## Technical Overview 🧠⚙️
+MNUE networks are trained with the `jw1912/bullet` tooling. External network
+files are kept outside the source repository; the historical network repository
+is:
 
-### 1. Core Architecture 🏗️
-- Language / standard: `C++20` 💻
-- Board model: bitboards with incremental state maintenance ♟️
-  - hash key 🔑
-  - eval cache 🧮
-  - king-square cache 👑
-  - other hot search state ⚡
-  - board core: `board/Attack.*`, `board/MoveGen.*`, `board/Position.*`
-- Main modules:
-  - `MoveGen` ♞
-  - `Search` 🔍
-  - `TT` 🧊
-  - `History` 📚
-  - `Evaluation` 🧠
-  - `NNUE` 🤖
-  - `UCI` 🗣️
-  - `Time` ⏱️
+```text
+https://github.com/MagnusU0001F984/MagnusMNUE
+```
 
-### 2. Search Framework 🔎🔥
-- Iterative Deepening 🪜
-- Main search: PVS / Principal Variation Search 🎯
-- Tactical frontier: Quiescence Search ⚔️
-- Aspiration Windows with fallback widening 🪟
-- Full `seldepth` tracking in UCI `info` output 📡
+## Syzygy Tablebases
 
-### 3. Move Ordering and Learned Signals 🧭📈
-- Staged MovePicker in main search:
-  - `TT move -> good captures -> killer1/2 -> quiets -> bad captures` 🧩
-- Quiet ordering signals 🤫:
-  - quiet history 📚
-  - countermove 🔁
-  - continuation history: `prev / prev2` 🧬
-- Capture ordering signals ⚔️:
-  - capture history 🩸
-  - immediate SEE term 👁️
-  - see-bias term ⚖️
-  - MVV-LVA support term ♟️
+MagnusChess probes local Syzygy `.rtbw` and `.rtbz` files through the vendored
+MIT-licensed Fathom backend.
 
-### 4. Implemented Pruning / Reductions 🌲✂️
-- TT cutoffs, bound-aware 🧊
-- IIR / Internal Iterative Reduction 🪜
-- Razoring 🪒
-- Reverse Futility 🔙
-- Null Move Pruning 🚫
-- SEE late bad-capture gate 👁️🚪
-- Futility pruning for shallow quiets 🤫
-- LMP / Late Move Pruning ⏳
-- History pruning 📚✂️
-- Partial LMR:
-  - quiet LMR with quiet strength + improving signal 🤫📈
-  - capture LMR with simple-capture branch + fail-high re-search ⚔️🔁
+Supported behavior includes:
 
-### 5. History / Experience System 🧠📚
-- killer table ☠️
-- quiet history table 🤫
-- capture history table ⚔️
-- countermove table 🔁
-- continuation history table 🧬
-- see-bias table 👁️⚖️
-- reward / penalty paths for cutoff winners and failed alternatives 🏆📉
-  - includes continuation updates 🧬
-  - includes see-bias updates 👁️
-
-### 6. Transposition Table / TT 🧊🔑
-- 64-byte clusters, 4 lanes 🛣️
-- probe / save + prefetch ⚡
-- replacement policy aware of:
-  - depth 🕳️
-  - age ⏳
-  - bound 📐
-  - PV status 🎯
-- sampled `hashfull` reporting with reduced reporting frequency 📊
-
-### 7. Evaluation 🧮♟️
-- HCE: tapered evaluation with MG / EG interpolation ⚖️
-- PST support, incrementally maintained 🗺️
-- NNUE: optional neural evaluation 🤖
-  - `UseNNUE`
-  - `EvalFile`
-- Automatic fallback to HCE if NNUE is unavailable 🛟
-
-### 8. Syzygy Tablebases
-- Native local `.rtbw` / `.rtbz` probing through the vendored MIT-licensed Fathom probe
-- Root DTZ ranking with WDL fallback
-- Internal WDL cutoffs with configurable piece and depth limits
-- 50-move-rule-aware root scores and UCI `tbhits` reporting
+- Root DTZ ranking with WDL fallback.
+- Internal WDL cutoffs with configurable piece and depth limits.
+- 50-move-rule-aware root scores.
+- UCI `tbhits` reporting.
 
 UCI setup example:
 
@@ -141,64 +143,33 @@ setoption name SyzygyProbeDepth value 1
 setoption name Syzygy50MoveRule value true
 ```
 
-### 9. Time Management and UCI ⏱️🗣️
-- Standard UCI commands:
-  - `uci`
-  - `isready`
-  - `position`
-  - `go`
-  - `stop`
-  - `quit`
-  - `setoption`
-- Exposed UCI options:
-  - `Hash` 🧊
-  - `Threads` 🧵
-  - `Contempt` 😈
-  - `Clear Hash` 🧹
-  - `UseNNUE` 🤖
-  - `Ponder` 💭
-  - `Singular Telemetry` (TT trust, exclusion cost, and extension outcomes; default off)
-  - `SyzygyPath`
-  - `SyzygyProbeDepth`
-  - `Syzygy50MoveRule`
-  - `SyzygyProbeLimit`
-  - `EvalFile` 📁
-- `go` supports:
-  - depth 🕳️
-  - nodes 🌐
-  - movetime ⏲️
-  - wtime / btime / inc / movestogo ♟️
-- TimeManager derives soft/hard budgets from clock, increment, moves-to-go, and game ply 📈
+## Build
 
----
+### Requirements
 
-## Build 🛠️🚀
+- 64-bit x86-64 compiler target.
+- `g++` with C++20 support.
+- `make` on Linux, WSL, or MSYS2.
+- `mingw32-make` on Windows with MinGW.
 
-### Requirements 📦
-- Compiler: `g++` with `-std=c++20` 💻
-- Build tool: `make`  
-  - `mingw32-make` on Windows 🪟
-- Default target CPU flags in `src/Makefile`:
-  - `AVX2 + BMI2 + POPCNT + LZCNT` ⚡
-- If your CPU does not support these, adjust `ARCH_FLAGS` in `src/Makefile`. 🧰
+The default `auto` profile maps to `native64` and uses `-march=native`. For a
+portable x86-64 binary, build the `portable64` profile.
 
-### Directory Layout 📁
-- Source: `src/` 🧾
-- Build output: `src/build/` 🚀
-- Object files: `src/build/obj/`
+### Windows
 
-### Windows / PowerShell + MinGW 🪟⚙️
 ```powershell
 cd src
 mingw32-make clean
 mingw32-make auto -j
 ```
 
-Output:
+Repository-relative output:
 
-* `src/build/MagnusChess.exe` 🦄
+```text
+src/build/MagnusChess.exe
+```
 
-### Linux / WSL / MSYS2 🐧⚙️
+### Linux, WSL, or MSYS2
 
 ```bash
 cd src
@@ -206,92 +177,205 @@ make clean
 make auto -j
 ```
 
-### 64-bit Build Profiles
+Repository-relative output:
+
+```text
+src/build/MagnusChess
+```
+
+### Build Profiles
 
 ```bash
-# Detect the local CPU through -march=native.
-# Output: build/MagnusChess[.exe]
+# Native build for the current machine.
 make auto -j
 
-# Portable x86-64 baseline without AVX2/BMI2/POPCNT requirements or PEXT.
-# Output: build/MagnusChess-portable64[.exe]
+# Portable x86-64 baseline.
 make portable64 -j
 
-# Enable instruction sets supported by the build machine.
-# Output: build/MagnusChess-native64[.exe]
+# Explicit native x86-64 build.
 make native64 -j
 
-# Build both variants.
+# Build both portable64 and native64.
 make variants -j
 
-# Display detected target, selected profile, and CPU flags.
+# Print compiler target, selected profile, CPU flags, and output path.
 make detect
 ```
 
-Output:
-
-* `src/build/MagnusChess` 🦄
-
-### Automatic PGO Build 🔥📈
+### PGO Build
 
 Set `PGO=1` to build an instrumented executable, run the benchmark workload,
-and automatically rebuild with profile-guided optimization:
+and rebuild with profile-guided optimization:
 
 ```bash
 cd src
 make auto PGO=1 -j
-
-# The flag also works with explicit build profiles.
-make portable64 PGO=1 -j
-make native64 PGO=1 -j
 ```
 
-Windows with MinGW uses the same flag:
+Windows uses the same variable:
 
 ```powershell
+cd src
 mingw32-make auto PGO=1 -j
 ```
 
-PGO outputs are written to `build/MagnusChess-<profile>-pgo[.exe]`. The default
-training workload is `bench`; override it with `PGO_BENCH_ARGS`, if needed.
+PGO output is written as:
 
----
-
-## Run Examples 🎮♟️
-
-### UCI Mode 🗣️
-
-```bash
-# No arguments starts UCI mode
-./src/build/MagnusChess
-
-# Equivalent explicit form
-./src/build/MagnusChess uci
+```text
+src/build/MagnusChess-<profile>-pgo[.exe]
 ```
 
-### Bench / Perft / Divide / Fixed-Depth Search 🧪⚡
+The default PGO training command is `bench`. Override it with
+`PGO_BENCH_ARGS` if a different workload is required.
+
+## Running
+
+Start UCI mode with no arguments:
 
 ```bash
-# perft: [perft] <depth> <hash_mb> <threads> [backend]
-./src/build/MagnusChess perft 6 64 1 magic
-
-# backend: auto | pext | magic | table | classical
-./src/build/MagnusChess 6 64 1 pext
-
-# divide: divide <depth> <hash_mb> <threads> [live] [backend]
-./src/build/MagnusChess divide 6 64 1 live magic
-
-# search: search <depth> <hash_mb>
-./src/build/MagnusChess search 8 64
-
-# TT benchmark: -tt -hash <mb> [-entries <count>]
-./src/build/MagnusChess -tt -hash 64
+cd src
+./build/MagnusChess
 ```
 
----
+Or explicitly:
 
-## MagnusChess🦄
+```bash
+cd src
+./build/MagnusChess uci
+```
 
-Fast search.
-Clean engineering.
-A little bit of unicorn energy. 🦄♟️✨
+Windows:
+
+```powershell
+cd src
+.\build\MagnusChess.exe uci
+```
+
+## Command-Line Tools
+
+```bash
+# Compact search benchmark.
+./build/MagnusChess bench 12 64 1
+
+# Perft benchmark.
+./build/MagnusChess perft 6 64 1 magic
+
+# Equivalent perft shorthand.
+./build/MagnusChess 6 64 1 pext
+
+# Divide output.
+./build/MagnusChess divide 6 64 1 live magic
+
+# Fixed-depth search benchmark.
+./build/MagnusChess search 8 64 1
+
+# Evaluation benchmark.
+./build/MagnusChess evalbench 1000 64
+
+# Transposition-table benchmark.
+./build/MagnusChess -tt -hash 64
+```
+
+Available attack backends for perft and divide:
+
+```text
+auto
+pext
+magic
+table
+classical
+```
+
+## UCI Interface
+
+Standard commands:
+
+```text
+uci
+isready
+ucinewgame
+position
+go
+stop
+ponderhit
+quit
+setoption
+```
+
+Supported `go` controls include:
+
+```text
+depth
+nodes
+movetime
+wtime
+btime
+winc
+binc
+movestogo
+ponder
+infinite
+searchmoves
+```
+
+Primary UCI options:
+
+| Option | Type | Default | Notes |
+|---|---|---:|---|
+| Hash | spin | 16 | Megabytes allocated to the transposition table. |
+| Threads | spin | 1 | Search thread count, maximum 512. |
+| MultiPV | spin | 1 | Multi-principal-variation output, maximum 256. |
+| Contempt | spin | 0 | Evaluation offset, range -10000 to 10000. |
+| Move Overhead | spin | 10 | Time-management overhead in milliseconds. |
+| Clear Hash | button | n/a | Clears the transposition table. |
+| UseNNUE | check | true | Enables the neural evaluation path when available. |
+| Ponder | check | true | Enables pondering support. |
+| FullPV | check | false | Enables extended PV reporting. |
+| Singular Telemetry | check | false | Emits singular-search telemetry. |
+| UseMsvSmp | check | false | Enables the MSV SMP mode. |
+| MsvInfo | check | false | Emits MSV diagnostic information. |
+| SyzygyPath | string | `<empty>` | Directory containing Syzygy files. |
+| SyzygyProbeDepth | spin | 1 | Minimum depth for tablebase probes, range 1 to 100. |
+| Syzygy50MoveRule | check | true | Applies 50-move-rule-aware tablebase scoring. |
+| SyzygyProbeLimit | spin | 7 | Maximum tablebase piece count, range 0 to 7. |
+| MNUEfile | string | `mm-8adbe41d1.MNUE` | External MNUE file path or `<embedded>`. |
+
+Diagnostic commands include:
+
+```text
+d
+eval
+bench
+perft
+divide
+mnuedebug
+mnuecheck
+mnueloadp2 <path-to-p2.mnue>
+mnuev2load <path-to-v2.mnue>
+mnuev2info
+mnuev2debug
+mnuev2eval
+mnuev2check [sequences plies]
+mnuev2bench 1000 5
+mnuev2scalar on|off
+mnuex1load <path-to-x1.mnue>
+mnuex1eval
+mnuex1bench
+mnuex1check
+```
+
+## Repository Layout
+
+```text
+src/                    Engine source
+src/board/              Board representation, attacks, and move generation
+src/mnue/               MNUE evaluators, loaders, embedded-network support
+src/syzygy/             Syzygy integration
+third_party/fathom/     Vendored Fathom tablebase probe
+tools/                  MNUE trainer utilities
+docs/                   Design notes and MNUE format documentation
+```
+
+## License
+
+MagnusChess is distributed under the MIT License. See `LICENSE` for details.
