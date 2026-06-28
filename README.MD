@@ -119,7 +119,7 @@ files are kept outside the source repository; the historical network repository
 is:
 
 ```text
-https://github.com/MagnusU0001F984/MagnusMNUE
+https://github.com/TMagnusN/MagnusMNUE
 ```
 
 ## Syzygy Tablebases
