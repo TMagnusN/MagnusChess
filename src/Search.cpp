@@ -235,6 +235,78 @@ enum class ScoreModel {
     Mnue
 };
 
+struct RootLine {
+    Move move = 0;
+    int score = -VALUE_INF;
+    int previous_score = -VALUE_INF;
+    memory::Bound bound = memory::BOUND_NONE;
+    int depth = 0;
+    int seldepth = 0;
+    Move pv[MAX_PLY]{};
+    int pv_length = 0;
+    bool searched = false;
+};
+
+[[nodiscard]] inline bool has_root_line_score(int score) noexcept {
+    return score != -VALUE_INF && score != VALUE_NONE;
+}
+
+[[nodiscard]] int root_line_index(
+    const std::vector<RootLine>& lines,
+    int first,
+    Move move
+) noexcept {
+    if (move_is_none(move))
+        return -1;
+
+    const int begin = std::max(0, first);
+    for (int i = begin; i < static_cast<int>(lines.size()); ++i)
+        if (lines[static_cast<std::size_t>(i)].move == move)
+            return i;
+
+    return -1;
+}
+
+[[nodiscard]] inline bool root_line_less(
+    const RootLine& lhs,
+    const RootLine& rhs
+) noexcept {
+    if (lhs.searched != rhs.searched)
+        return lhs.searched;
+    if (lhs.score != rhs.score)
+        return lhs.score > rhs.score;
+    if (lhs.previous_score != rhs.previous_score)
+        return lhs.previous_score > rhs.previous_score;
+    return false;
+}
+
+void stable_sort_root_lines(
+    std::vector<RootLine>& lines,
+    int first,
+    int last
+) noexcept {
+    const int begin = std::clamp(first, 0, static_cast<int>(lines.size()));
+    const int end = std::clamp(last, begin, static_cast<int>(lines.size()));
+    for (int i = begin + 1; i < end; ++i) {
+        RootLine value = lines[static_cast<std::size_t>(i)];
+        int j = i;
+        while (j > begin &&
+               root_line_less(value, lines[static_cast<std::size_t>(j - 1)])) {
+            lines[static_cast<std::size_t>(j)] =
+                lines[static_cast<std::size_t>(j - 1)];
+            --j;
+        }
+        lines[static_cast<std::size_t>(j)] = value;
+    }
+}
+
+void stable_sort_root_lines(
+    std::vector<RootLine>& lines,
+    int first
+) noexcept {
+    stable_sort_root_lines(lines, first, static_cast<int>(lines.size()));
+}
+
 [[nodiscard]] static inline int mvv_lva_capture_term(
     const Position& pos,
     Move move
@@ -324,6 +396,7 @@ inline void append_uci_score(
 ) noexcept {
     return limits.use_msv_smp &&
            limits.thread_count > 1 &&
+           limits.multipv <= 1 &&
            limits.root_msv != nullptr;
 }
 
@@ -3963,6 +4036,8 @@ struct Searcher {
     struct RootMoveResult {
         int score = -VALUE_INF;
         bool improved_alpha = false;
+        Move pv[MAX_PLY]{};
+        int pv_length = 0;
     };
 
     [[nodiscard]] RootMoveResult search_root_move(
@@ -3971,11 +4046,13 @@ struct Searcher {
         int depth,
         int alpha,
         int beta,
-        bool full_window
+        bool full_window,
+        bool force_pv_capture = false
     ) noexcept {
         const int alpha_before = alpha;
         Position local_root = root;
 
+        pv_length[1] = 0;
         StateInfo st;
         set_move_history_context(local_root, move, 0);
         make_search_move(local_root, move, st);
@@ -3999,8 +4076,20 @@ struct Searcher {
         RootMoveResult result;
         result.score = score;
         result.improved_alpha = score > alpha_before;
-        if (result.improved_alpha)
+        if (force_pv_capture || result.improved_alpha)
             update_pv(0, move);
+        result.pv_length = pv_length[0];
+        if (result.pv_length > 0) {
+            std::memcpy(
+                result.pv,
+                pv_table[0],
+                static_cast<std::size_t>(result.pv_length) * sizeof(Move)
+            );
+        }
+        if (result.pv_length <= 0 || result.pv[0] != move) {
+            result.pv[0] = move;
+            result.pv_length = 1;
+        }
         return result;
     }
 
@@ -4106,6 +4195,133 @@ struct Searcher {
         result.tb_hits = tb_hits;
         result.seldepth = seldepth;
         save_tt(root, depth, 0, best_score, raw_eval, result.best_move, alpha0, beta, true);
+        return result;
+    }
+
+    [[nodiscard]] SearchResult search_root(
+        const Position& root,
+        std::vector<RootLine>& root_lines,
+        int pv_idx,
+        int depth,
+        Move hint_move,
+        int alpha,
+        int beta
+    ) noexcept {
+        // Root search mirrors PVS, but it also keeps the best move/result for UCI output.
+        SearchResult result{};
+        result.depth = depth;
+        update_seldepth(0);
+        rep_keys[0] = root.key;
+
+        const memory::TTProbe probe = memory::tt_probe(mem.tt, root.key);
+        const Move tt_move = tt_move_from_probe(probe);
+        const bool checked = in_check(root);
+        const StaticEvalInfo eval_info = resolve_static_eval(root, probe, 0, checked, false);
+        const int raw_eval = eval_info.raw;
+        const int base_eval = eval_info.base;
+        const int alpha0 = alpha;
+
+        if (pv_idx < 0 || pv_idx >= static_cast<int>(root_lines.size())) {
+            result.score = checked ? -VALUE_MATE : draw_score(root.side_to_move);
+            result.seldepth = 0;
+            return result;
+        }
+
+        Move root_hint = root_lines[static_cast<std::size_t>(pv_idx)].move;
+        if (pv_idx == 0) {
+            const Move preferred = move_is_none(tt_move) ? hint_move : tt_move;
+            if (root_line_index(root_lines, pv_idx, preferred) >= 0)
+                root_hint = preferred;
+        }
+
+        MoveList list{};
+        for (int i = pv_idx; i < static_cast<int>(root_lines.size()); ++i)
+            list.moves[list.size++] = root_lines[static_cast<std::size_t>(i)].move;
+
+        ScoredMoveList scored;
+        score_moves(root, list, scored, root_hint, 0, depth);
+        apply_msv_root_order(root, scored, depth);
+        int best_score = -VALUE_INF;
+        result.best_move = 0;
+
+        for (int i = 0; i < scored.size; ++i) {
+            if (hit_hard_limit())
+                break;
+
+            const Move move = pick_next(scored, i);
+            const int line_index = root_line_index(root_lines, pv_idx, move);
+            if (line_index < 0)
+                continue;
+
+#if MAGNUS_SEARCHSTATS_OBS
+            ++stats.root_moves_searched;
+#endif
+            RootMsvActiveGuard msv_active(limits, move);
+            const RootMoveResult move_result =
+                search_root_move(root, move, depth, alpha, beta, i == 0, i == 0);
+            const int score = move_result.score;
+            RootLine& line = root_lines[static_cast<std::size_t>(line_index)];
+            line.searched = true;
+            line.depth = depth;
+            line.score = score;
+            line.bound = score_bound_from_window(score, alpha0, beta);
+            line.seldepth = seldepth;
+            line.pv_length = move_result.pv_length;
+            std::memcpy(
+                line.pv,
+                move_result.pv,
+                static_cast<std::size_t>(line.pv_length) * sizeof(Move)
+            );
+
+            if (score > best_score) {
+                best_score = score;
+                result.best_move = move;
+            }
+
+            if (move_result.improved_alpha) {
+                alpha = score;
+                if (alpha >= beta)
+                    break;
+            }
+        }
+
+        if (result.best_move == 0) {
+            result.score = checked ? -VALUE_MATE : draw_score(root.side_to_move);
+            result.best_move = 0;
+            result.seldepth = 0;
+            return result;
+        }
+
+        if (best_score == -VALUE_INF)
+            best_score = alpha;
+
+        stable_sort_root_lines(root_lines, pv_idx);
+        RootLine& selected = root_lines[static_cast<std::size_t>(pv_idx)];
+        if (selected.searched) {
+            result.best_move = selected.move;
+            best_score = selected.score;
+        }
+
+        if (pv_idx == 0 &&
+            !checked &&
+            !is_mate_window(best_score) &&
+            best_score > alpha0 &&
+            best_score < beta) {
+            update_correction_history(
+                static_cast<Color>(root.side_to_move),
+                eval_info.keys,
+                base_eval,
+                best_score,
+                depth
+            );
+        }
+
+        result.score = best_score;
+        result.nodes = nodes;
+        result.tb_hits = tb_hits;
+        result.seldepth = seldepth;
+        if (pv_idx == 0)
+            save_tt(root, depth, 0, best_score, raw_eval, result.best_move, alpha0, beta, true);
         return result;
     }
 
@@ -4464,6 +4680,7 @@ struct IterativeWorkerResult {
     Move pv[MAX_PLY]{};
     int pv_length = 0;
     memory::Bound score_bound = memory::BOUND_EXACT;
+    std::vector<RootLine> lines{};
 };
 
 [[nodiscard]] bool pv_move_is_legal(
@@ -4776,7 +4993,155 @@ void extend_syzygy_pv(
     }
 }
 
-void capture_completed_result(
+void build_root_lines(
+    Searcher& searcher,
+    const Position& root,
+    std::vector<RootLine>& lines,
+    int depth
+) {
+    MoveList list{};
+    generate_legal(root, searcher.mem, list);
+
+    if (searcher.limits.root_move_count > 0) {
+        MoveList filtered{};
+        for (int i = 0; i < list.size; ++i) {
+            const Move move = list.moves[i];
+            bool allowed = false;
+            for (int j = 0; j < searcher.limits.root_move_count; ++j) {
+                if (searcher.limits.root_moves[j] == move) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (allowed)
+                filtered.moves[filtered.size++] = move;
+        }
+        list = filtered;
+    }
+
+    const memory::TTProbe probe = memory::tt_probe(searcher.mem.tt, root.key);
+    const Move tt_move = searcher.tt_move_from_probe(probe);
+    ScoredMoveList scored{};
+    searcher.score_moves(root, list, scored, tt_move, 0, depth);
+    searcher.apply_msv_root_order(root, scored, depth);
+
+    lines.clear();
+    lines.reserve(static_cast<std::size_t>(scored.size));
+    for (int i = 0; i < scored.size; ++i) {
+        RootLine line{};
+        line.move = searcher.pick_next(scored, i);
+        line.pv[0] = line.move;
+        line.pv_length = 1;
+        lines.push_back(line);
+    }
+}
+
+[[nodiscard]] SearchResult root_line_to_result(
+    const RootLine& line,
+    int depth,
+    u64 nodes,
+    u64 tb_hits
+) noexcept {
+    SearchResult result{};
+    result.best_move = line.move;
+    result.score = line.score;
+    result.nodes = nodes;
+    result.tb_hits = tb_hits;
+    result.depth = depth;
+    result.seldepth = line.seldepth;
+    result.pv_length = line.pv_length;
+    for (int i = 0; i < result.pv_length; ++i)
+        result.pv[i] = line.pv[i];
+    return result;
+}
+
+void complete_root_line_pvs_from_tt(
+    const Position& root,
+    Searcher& searcher,
+    std::vector<RootLine>& lines,
+    int line_count,
+    int depth
+) noexcept {
+    if (depth <= 1)
+        return;
+
+    const int completed = std::clamp(
+        line_count,
+        0,
+        static_cast<int>(lines.size())
+    );
+
+    for (int i = 0; i < completed; ++i) {
+        RootLine& line = lines[static_cast<std::size_t>(i)];
+        if (!line.searched ||
+            move_is_none(line.move) ||
+            line.bound != memory::BOUND_EXACT) {
+            continue;
+        }
+
+        line.pv_length = validate_and_sanitize_pv(
+            root,
+            searcher.mem,
+            line.pv,
+            line.pv_length
+        );
+        if (line.pv_length > 1 && line.pv[0] == line.move)
+            continue;
+
+        Position tt_pv_root{};
+        position_copy_without_accumulators(tt_pv_root, root);
+
+        Move rebuilt_pv[MAX_PLY]{};
+        const int rebuilt_length = reconstruct_tt_pv(
+            tt_pv_root,
+            searcher.mem,
+            searcher.limits,
+            line.move,
+            rebuilt_pv,
+            std::min(depth, MAX_PLY)
+        );
+        if (rebuilt_length > line.pv_length &&
+            rebuilt_pv[0] == line.move) {
+            std::memcpy(
+                line.pv,
+                rebuilt_pv,
+                static_cast<std::size_t>(rebuilt_length) * sizeof(Move)
+            );
+            line.pv_length = rebuilt_length;
+        } else if (line.pv_length <= 0) {
+            line.pv[0] = line.move;
+            line.pv_length = 1;
+        }
+    }
+}
+
+void copy_result_to_root_line(
+    RootLine& line,
+    const SearchResult& result,
+    const Move* pv,
+    int pv_length,
+    memory::Bound bound
+) noexcept {
+    line.move = result.best_move;
+    line.score = result.score;
+    line.bound = bound;
+    line.depth = result.depth;
+    line.seldepth = result.seldepth;
+    line.pv_length = std::clamp(pv_length, 0, MAX_PLY);
+    if (line.pv_length > 0 && pv != nullptr) {
+        std::memcpy(
+            line.pv,
+            pv,
+            static_cast<std::size_t>(line.pv_length) * sizeof(Move)
+        );
+    } else if (!move_is_none(result.best_move)) {
+        line.pv[0] = result.best_move;
+        line.pv_length = 1;
+    }
+    line.searched = !move_is_none(result.best_move);
+}
+
+void capture_completed_single_result(
     IterativeWorkerResult& result,
     const SearchResult& best,
     const Searcher& searcher,
@@ -4784,10 +5149,52 @@ void capture_completed_result(
 ) noexcept {
     result.best = best;
     result.score_bound = score_bound;
+    result.lines.clear();
     result.pv_length = searcher.pv_length[0];
     result.best.pv_length = result.pv_length;
     for (int i = 0; i < result.pv_length; ++i) {
         result.pv[i] = searcher.pv_table[0][i];
+        result.best.pv[i] = result.pv[i];
+    }
+}
+
+void capture_completed_result(
+    IterativeWorkerResult& result,
+    const SearchResult& best,
+    const std::vector<RootLine>& root_lines,
+    int line_count,
+    memory::Bound score_bound
+) {
+    result.best = best;
+    result.score_bound = score_bound;
+    result.lines.clear();
+    const int copied_lines = std::clamp(
+        line_count,
+        0,
+        static_cast<int>(root_lines.size())
+    );
+    result.lines.reserve(static_cast<std::size_t>(copied_lines));
+    for (int i = 0; i < copied_lines; ++i) {
+        const RootLine& line = root_lines[static_cast<std::size_t>(i)];
+        if (!line.searched || move_is_none(line.move))
+            break;
+        result.lines.push_back(line);
+    }
+
+    result.pv_length = result.best.pv_length;
+    if (!result.lines.empty()) {
+        const RootLine& first = result.lines.front();
+        result.score_bound = first.bound == memory::BOUND_NONE
+            ? score_bound
+            : first.bound;
+        result.pv_length = first.pv_length;
+        result.best.pv_length = result.pv_length;
+    }
+    result.best.pv_length = result.pv_length;
+    for (int i = 0; i < result.pv_length; ++i) {
+        result.pv[i] = result.lines.empty()
+            ? result.best.pv[i]
+            : result.lines.front().pv[i];
         result.best.pv[i] = result.pv[i];
     }
 }
@@ -4804,7 +5211,8 @@ void emit_iteration_info(
     u64 nodes,
     u64 tb_hits,
     int depth,
-    memory::Bound score_bound
+    memory::Bound score_bound,
+    int multipv_index
 ) {
     const double seconds =
         std::chrono::duration<double>(Searcher::clock::now() - search_start).count();
@@ -4816,7 +5224,7 @@ void emit_iteration_info(
 
     stream << "info depth " << depth
            << " seldepth " << current.seldepth
-           << " multipv 1 ";
+           << " multipv " << multipv_index << ' ';
     append_uci_score(
         stream,
         current.score,
@@ -4867,7 +5275,47 @@ void emit_iteration_info(
     stream << '\n';
 }
 
-[[nodiscard]] IterativeWorkerResult iterative_deepening_worker(
+void emit_root_lines_info(
+    std::ostream& stream,
+    memory::Memory& local_mem,
+    const Position& local_root,
+    const Searcher& searcher,
+    const std::vector<RootLine>& lines,
+    int line_count,
+    Searcher::clock::time_point search_start,
+    u64 nodes,
+    u64 tb_hits,
+    int depth
+) {
+    const int emitted_count = std::clamp(
+        line_count,
+        0,
+        static_cast<int>(lines.size())
+    );
+    for (int i = 0; i < emitted_count; ++i) {
+        const RootLine& line = lines[static_cast<std::size_t>(i)];
+        if (!line.searched || move_is_none(line.move))
+            break;
+        SearchResult current = root_line_to_result(line, depth, nodes, tb_hits);
+        emit_iteration_info(
+            stream,
+            local_mem,
+            local_root,
+            searcher,
+            current,
+            line.pv,
+            line.pv_length,
+            search_start,
+            nodes,
+            tb_hits,
+            depth,
+            line.bound == memory::BOUND_NONE ? memory::BOUND_EXACT : line.bound,
+            i + 1
+        );
+    }
+}
+
+[[nodiscard]] IterativeWorkerResult iterative_deepening_worker_single(
     Searcher& searcher,
     const Position& local_root,
     std::ostream* local_out,
@@ -4888,7 +5336,7 @@ void emit_iteration_info(
     u64 total_tb_hits = searcher.limits.shared_tb_hits == nullptr
         ? searcher.limits.root_tb_hits
         : 0;
-    int prev_depth_end_ms = 0;  // for fixed-time per-depth cost tracking
+    int prev_depth_end_ms = 0;
     Move fallback_best_move = 0;
 #if MAGNUS_SEARCHSTATS_OBS
     u64 last_reported_nodes = 0;
@@ -5058,7 +5506,7 @@ void emit_iteration_info(
             best.nodes = total_nodes;
             best.tb_hits = total_tb_hits;
             hint_move = current.best_move;
-            capture_completed_result(result, best, searcher, current_score_bound);
+            capture_completed_single_result(result, best, searcher, current_score_bound);
         }
 
         if (root_msv_enabled(searcher.limits) && !move_is_none(current.best_move)) {
@@ -5111,7 +5559,8 @@ void emit_iteration_info(
                 reported_nodes,
                 reported_tb_hits,
                 depth,
-                current_score_bound
+                current_score_bound,
+                1
             );
             searcher.emit_msv_info(*local_out, keyed_root, depth);
 #if MAGNUS_SEARCHSTATS_OBS
@@ -5151,7 +5600,8 @@ void emit_iteration_info(
                         reported_tb_hits,
                         depth,
                         // Partial root search is a best-so-far estimate, not exact.
-                        memory::BOUND_LOWER
+                        memory::BOUND_LOWER,
+                        1
                     );
                 } else if (depth > best.depth + 1) {
                     emit_iteration_info(
@@ -5166,8 +5616,583 @@ void emit_iteration_info(
                         reported_nodes,
                         reported_tb_hits,
                         best.depth,
-                        result.score_bound
+                        result.score_bound,
+                        1
                     );
+                }
+#if MAGNUS_SEARCHSTATS_OBS
+                const u64 reported_depth_nodes =
+                    reported_nodes >= last_reported_nodes
+                        ? reported_nodes - last_reported_nodes
+                        : depth_nodes;
+                emit_searchstats_line(
+                    *local_out,
+                    depth,
+                    true,
+                    reported_depth_nodes,
+                    aspiration_fail_low,
+                    aspiration_fail_high,
+                    stats_before,
+                    searcher.stats
+                );
+#endif
+            }
+            break;
+        }
+
+        if (should_stop_for_time)
+            break;
+
+        if (searcher.stop_after_completed_depth())
+            break;
+    }
+
+    // Ponder busy-wait: after the depth loop finishes (e.g. MAX_PLY reached),
+    // keep the search "alive" until stop or ponderhit arrives.
+    if (searcher.limits.ponder && !searcher.stopped) {
+        while (!searcher.stopped && searcher.pondering_active()) {
+            if (searcher.hit_hard_limit())
+                break;
+            searcher.publish_nodes();
+            searcher.publish_tb_hits();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (searcher.stop_on_ponderhit) {
+            searcher.stopped = true;
+            searcher.hard_stop = true;
+        }
+    }
+
+    searcher.publish_nodes();
+    searcher.publish_tb_hits();
+    if (move_is_none(result.best.best_move) && !move_is_none(fallback_best_move)) {
+        result.best.best_move = fallback_best_move;
+        result.best.pv[0] = fallback_best_move;
+        result.best.pv_length = 1;
+        result.pv[0] = fallback_best_move;
+        result.pv_length = 1;
+    }
+    result.best.nodes = searcher.limits.shared_nodes != nullptr
+        ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
+        : total_nodes;
+    result.best.tb_hits = searcher.limits.shared_tb_hits != nullptr
+        ? searcher.limits.shared_tb_hits->load(std::memory_order_relaxed)
+        : total_tb_hits;
+
+#if MAGNUS_CAPTURE_OBS
+    if (local_out != nullptr && searcher.limits.report_info)
+        searcher.emit_capture_observation(*local_out);
+#endif
+#if MAGNUS_MOVEPICKER_OBS
+    if (local_out != nullptr && searcher.limits.report_info)
+        searcher.emit_movepicker_observation(*local_out);
+#endif
+#if MAGNUS_SEARCH_OBS
+    if (local_out != nullptr && searcher.limits.report_info)
+        searcher.emit_search_observation(*local_out);
+#endif
+    if (local_out != nullptr &&
+        searcher.limits.report_info &&
+        searcher.limits.singular_telemetry) {
+        searcher.emit_singular_telemetry(*local_out);
+    }
+#if MAGNUS_LMR_OBS
+    if (local_out != nullptr && searcher.limits.report_info)
+        searcher.emit_lmr_observation(*local_out);
+#endif
+
+    return result;
+}
+
+[[nodiscard]] IterativeWorkerResult iterative_deepening_worker(
+    Searcher& searcher,
+    const Position& local_root,
+    std::ostream* local_out,
+    Searcher::clock::time_point search_start
+) {
+    if (searcher.limits.multipv <= 1)
+        return iterative_deepening_worker_single(
+            searcher,
+            local_root,
+            local_out,
+            search_start
+        );
+
+    IterativeWorkerResult result{};
+    SearchResult best{};
+    Move hint_move = 0;
+    Position keyed_root = local_root;
+    position_refresh_key(keyed_root, searcher.mem.tables);
+    searcher.p2_accumulator_stack.reset();
+    searcher.x1_accumulator_stack.reset();
+    searcher.v2_accumulator_stack.reset();
+    searcher.root_side_to_move = keyed_root.side_to_move;
+    searcher.start_time = search_start;
+    searcher.stop_on_ponderhit = false;
+    u64 total_nodes = 0;
+    u64 total_tb_hits = searcher.limits.shared_tb_hits == nullptr
+        ? searcher.limits.root_tb_hits
+        : 0;
+    int prev_depth_end_ms = 0;  // for fixed-time per-depth cost tracking
+    Move fallback_best_move = 0;
+#if MAGNUS_SEARCHSTATS_OBS
+    u64 last_reported_nodes = 0;
+#endif
+    const int max_depth =
+        std::clamp(searcher.limits.depth, 1, MAX_SEARCH_DEPTH);
+    IterationTimeState time_state{};
+    std::vector<RootLine> root_lines{};
+    build_root_lines(searcher, keyed_root, root_lines, 1);
+    time_state.root_legal_count = static_cast<int>(root_lines.size());
+    if (!root_lines.empty())
+        fallback_best_move = root_lines.front().move;
+
+    for (int depth = 1; depth <= max_depth; ++depth) {
+        SearchResult current{};
+        u64 depth_nodes = 0;
+        u64 depth_tb_hits = 0;
+#if MAGNUS_SEARCHSTATS_OBS
+        int aspiration_fail_low = 0;
+        int aspiration_fail_high = 0;
+        const Searcher::SearchStats stats_before = searcher.stats;
+#endif
+
+        memory::Bound current_score_bound = memory::BOUND_EXACT;
+        int completed_line_count = 0;
+
+        for (RootLine& line : root_lines) {
+            line.previous_score = line.score;
+            line.score = -VALUE_INF;
+            line.bound = memory::BOUND_NONE;
+            line.depth = 0;
+            line.seldepth = 0;
+            line.searched = false;
+            line.pv[0] = line.move;
+            line.pv_length = move_is_none(line.move) ? 0 : 1;
+        }
+
+        if (root_lines.empty()) {
+            current.depth = depth;
+            current.score = searcher.in_check(keyed_root)
+                ? -VALUE_MATE
+                : searcher.draw_score(keyed_root.side_to_move);
+            current.seldepth = 0;
+            current_score_bound = memory::BOUND_EXACT;
+        } else {
+            const int requested_multipv = std::clamp(
+                searcher.limits.multipv,
+                1,
+                static_cast<int>(root_lines.size())
+            );
+
+            for (int pv_idx = 0; pv_idx < requested_multipv; ++pv_idx) {
+                if (searcher.stopped)
+                    break;
+
+                int alpha = -VALUE_INF;
+                int beta = VALUE_INF;
+                int delta = ASPIRATION_DELTA;
+                int line_max_seldepth = 0;
+
+                const int previous_score =
+                    root_lines[static_cast<std::size_t>(pv_idx)].previous_score;
+                const int aspiration_base = has_root_line_score(previous_score)
+                    ? previous_score
+                    : (has_root_line_score(best.score) ? best.score : 0);
+
+                if (use_root_aspiration(searcher.limits, depth) &&
+                    has_root_line_score(aspiration_base)) {
+                    alpha = std::max(-VALUE_INF, aspiration_base - delta);
+                    beta = std::min(VALUE_INF, aspiration_base + delta);
+                }
+
+                while (true) {
+                    if (searcher.stopped)
+                        break;
+
+                    reset_searcher_iteration(
+                        searcher,
+                        search_start,
+                        total_nodes + depth_nodes
+                    );
+
+                    const int attempt_alpha = alpha;
+                    const int attempt_beta = beta;
+                    const Move line_hint = pv_idx == 0
+                        ? hint_move
+                        : root_lines[static_cast<std::size_t>(pv_idx)].move;
+
+                    current = searcher.search_root(
+                        keyed_root,
+                        root_lines,
+                        pv_idx,
+                        depth,
+                        line_hint,
+                        attempt_alpha,
+                        attempt_beta
+                    );
+                    line_max_seldepth = std::max(line_max_seldepth, searcher.seldepth);
+                    current.seldepth = line_max_seldepth;
+                    if (pv_idx < static_cast<int>(root_lines.size()))
+                        root_lines[static_cast<std::size_t>(pv_idx)].seldepth =
+                            line_max_seldepth;
+
+                    searcher.publish_nodes();
+                    searcher.publish_tb_hits();
+                    depth_nodes += current.nodes;
+                    depth_tb_hits += current.tb_hits;
+                    current_score_bound = score_bound_from_window(
+                        current.score,
+                        attempt_alpha,
+                        attempt_beta
+                    );
+                    if (pv_idx < static_cast<int>(root_lines.size()))
+                        root_lines[static_cast<std::size_t>(pv_idx)].bound =
+                            current_score_bound;
+
+                    if (searcher.stopped || depth == 1)
+                        break;
+
+                    if (current.score <= attempt_alpha) {
+#if MAGNUS_SEARCHSTATS_OBS
+                        ++aspiration_fail_low;
+#endif
+                        alpha = std::max(-VALUE_INF, current.score - delta);
+                        beta = std::min(VALUE_INF, current.score + delta);
+                        delta *= 2;
+                        continue;
+                    }
+
+                    if (current.score >= attempt_beta) {
+#if MAGNUS_SEARCHSTATS_OBS
+                        ++aspiration_fail_high;
+#endif
+                        alpha = std::max(-VALUE_INF, current.score - delta);
+                        beta = std::min(VALUE_INF, current.score + delta);
+                        delta *= 2;
+                        continue;
+                    }
+
+                    break;
+                }
+
+                if (pv_idx < static_cast<int>(root_lines.size()) &&
+                    root_lines[static_cast<std::size_t>(pv_idx)].searched) {
+                    completed_line_count = std::max(completed_line_count, pv_idx + 1);
+                    stable_sort_root_lines(root_lines, 0, completed_line_count);
+                }
+
+                if (searcher.stopped)
+                    break;
+            }
+
+            if (completed_line_count > 0) {
+                complete_root_line_pvs_from_tt(
+                    keyed_root,
+                    searcher,
+                    root_lines,
+                    completed_line_count,
+                    depth
+                );
+                current = root_line_to_result(
+                    root_lines.front(),
+                    depth,
+                    depth_nodes,
+                    depth_tb_hits
+                );
+                current_score_bound = root_lines.front().bound == memory::BOUND_NONE
+                    ? memory::BOUND_EXACT
+                    : root_lines.front().bound;
+            }
+        }
+
+        if (searcher.limits.full_pv &&
+            !searcher.stopped &&
+            completed_line_count > 0 &&
+            current_score_bound == memory::BOUND_EXACT &&
+            root_lines.front().pv_length <= 1 &&
+            !move_is_none(current.best_move)) {
+            Position tt_pv_root{};
+            position_copy_without_accumulators(tt_pv_root, keyed_root);
+
+            Move rebuilt_pv[MAX_PLY]{};
+            const int rebuilt_length = reconstruct_tt_pv(
+                tt_pv_root,
+                searcher.mem,
+                searcher.limits,
+                current.best_move,
+                rebuilt_pv,
+                std::min(depth, MAX_PLY)
+            );
+            if (rebuilt_length > root_lines.front().pv_length &&
+                rebuilt_pv[0] == current.best_move) {
+                std::memcpy(
+                    root_lines.front().pv,
+                    rebuilt_pv,
+                    static_cast<std::size_t>(rebuilt_length) * sizeof(Move)
+                );
+                root_lines.front().pv_length = rebuilt_length;
+                current = root_line_to_result(
+                    root_lines.front(),
+                    depth,
+                    depth_nodes,
+                    depth_tb_hits
+                );
+            }
+        }
+
+        if (!searcher.stopped &&
+            completed_line_count > 0 &&
+            !move_is_none(current.best_move)) {
+            const u64 recovery_tb_hits_before = searcher.tb_hits;
+            const int score_before_recovery = current.score;
+            const memory::Bound bound_before_recovery = current_score_bound;
+            const u64 recovery_nodes =
+                searcher.recover_ponder_pv_full_window(keyed_root, current, depth);
+            if (recovery_nodes > 0) {
+                depth_nodes += recovery_nodes;
+                depth_tb_hits += searcher.tb_hits >= recovery_tb_hits_before
+                    ? searcher.tb_hits - recovery_tb_hits_before
+                    : 0;
+                current.seldepth = std::max(current.seldepth, searcher.seldepth);
+                searcher.publish_nodes();
+                searcher.publish_tb_hits();
+                if (searcher.limits.multipv > 1) {
+                    current.score = score_before_recovery;
+                    current_score_bound = bound_before_recovery;
+                }
+                copy_result_to_root_line(
+                    root_lines.front(),
+                    current,
+                    searcher.pv_table[0],
+                    searcher.pv_length[0],
+                    searcher.limits.multipv > 1
+                        ? bound_before_recovery
+                        : memory::BOUND_EXACT
+                );
+                complete_root_line_pvs_from_tt(
+                    keyed_root,
+                    searcher,
+                    root_lines,
+                    completed_line_count,
+                    depth
+                );
+                current = root_line_to_result(
+                    root_lines.front(),
+                    depth,
+                    depth_nodes,
+                    depth_tb_hits
+                );
+            }
+        }
+
+        if (searcher.limits.root_in_tb &&
+            completed_line_count > 0 &&
+            std::abs(current.score) < VALUE_MATE - MAX_PLY) {
+            current.score = Searcher::tablebase_score(
+                static_cast<syzygy::Wdl>(searcher.limits.root_tb_wdl),
+                0,
+                searcher.limits.syzygy_50_move_rule
+            );
+            root_lines.front().score = current.score;
+            current_score_bound = memory::BOUND_EXACT;
+            root_lines.front().bound = current_score_bound;
+        } else if (completed_line_count > 0) {
+            current_score_bound = root_lines.front().bound == memory::BOUND_NONE
+                ? current_score_bound
+                : root_lines.front().bound;
+        }
+
+        total_nodes += depth_nodes;
+        total_tb_hits += depth_tb_hits;
+        {
+            const int now_ms = searcher.timed_elapsed_ms();
+            time_state.last_depth_time_ms = now_ms - prev_depth_end_ms;
+            time_state.last_depth_nodes = depth_nodes;
+            prev_depth_end_ms = now_ms;
+        }
+        const bool stopped_mid_depth = searcher.stopped && best.depth > 0;
+
+        if (!searcher.stopped || best.depth == 0) {
+            best = current;
+            best.nodes = total_nodes;
+            best.tb_hits = total_tb_hits;
+            hint_move = current.best_move;
+            if (completed_line_count > 0) {
+                root_lines.front().score = best.score;
+                root_lines.front().depth = best.depth;
+                capture_completed_result(
+                    result,
+                    best,
+                    root_lines,
+                    completed_line_count,
+                    current_score_bound
+                );
+            } else {
+                result.best = best;
+                result.score_bound = current_score_bound;
+                result.pv_length = 0;
+                result.lines.clear();
+            }
+        }
+
+        if (root_msv_enabled(searcher.limits) &&
+            completed_line_count > 0 &&
+            !move_is_none(current.best_move)) {
+            const bool msv_stopped = searcher.stopped || searcher.hit_hard_limit();
+            const bool pv_valid =
+                root_lines.front().pv_length > 2 &&
+                root_lines.front().pv[0] == current.best_move;
+            root_msv_record_completed(
+                searcher.limits,
+                current.best_move,
+                depth,
+                current.seldepth,
+                current.score,
+                current_score_bound,
+                msv_stopped,
+                pv_valid,
+                root_lines.front().pv_length
+            );
+        }
+
+        const bool should_stop_for_time =
+            !stopped_mid_depth &&
+            should_stop_after_iteration(searcher, time_state, best, depth);
+
+        if (local_out != nullptr &&
+            searcher.limits.report_info &&
+            !stopped_mid_depth) {
+            const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
+                ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
+                : total_nodes;
+            const u64 reported_tb_hits = searcher.limits.shared_tb_hits != nullptr
+                ? searcher.limits.shared_tb_hits->load(std::memory_order_relaxed)
+                : total_tb_hits;
+#if MAGNUS_SEARCHSTATS_OBS
+            const u64 reported_depth_nodes =
+                reported_nodes >= last_reported_nodes
+                    ? reported_nodes - last_reported_nodes
+                    : depth_nodes;
+            last_reported_nodes = reported_nodes;
+#endif
+            if (completed_line_count > 0) {
+                emit_root_lines_info(
+                    *local_out,
+                    searcher.mem,
+                    keyed_root,
+                    searcher,
+                    root_lines,
+                    completed_line_count,
+                    search_start,
+                    reported_nodes,
+                    reported_tb_hits,
+                    depth
+                );
+            } else {
+                emit_iteration_info(
+                    *local_out,
+                    searcher.mem,
+                    keyed_root,
+                    searcher,
+                    current,
+                    current.pv,
+                    current.pv_length,
+                    search_start,
+                    reported_nodes,
+                    reported_tb_hits,
+                    depth,
+                    current_score_bound,
+                    1
+                );
+            }
+            searcher.emit_msv_info(*local_out, keyed_root, depth);
+#if MAGNUS_SEARCHSTATS_OBS
+            emit_searchstats_line(
+                *local_out,
+                depth,
+                false,
+                reported_depth_nodes,
+                aspiration_fail_low,
+                aspiration_fail_high,
+                stats_before,
+                searcher.stats
+            );
+#endif
+        }
+
+        if (stopped_mid_depth) {
+            if (local_out != nullptr &&
+                searcher.limits.report_info) {
+                const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
+                    ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
+                    : total_nodes;
+                const u64 reported_tb_hits = searcher.limits.shared_tb_hits != nullptr
+                    ? searcher.limits.shared_tb_hits->load(std::memory_order_relaxed)
+                    : total_tb_hits;
+                if (!move_is_none(current.best_move) && current.nodes > 0) {
+                    if (completed_line_count > 0) {
+                        emit_root_lines_info(
+                            *local_out,
+                            searcher.mem,
+                            keyed_root,
+                            searcher,
+                            root_lines,
+                            completed_line_count,
+                            search_start,
+                            reported_nodes,
+                            reported_tb_hits,
+                            depth
+                        );
+                    } else {
+                        emit_iteration_info(
+                            *local_out,
+                            searcher.mem,
+                            keyed_root,
+                            searcher,
+                            current,
+                            current.pv,
+                            current.pv_length,
+                            search_start,
+                            reported_nodes,
+                            reported_tb_hits,
+                            depth,
+                            // Partial root search is a best-so-far estimate, not exact.
+                            memory::BOUND_LOWER,
+                            1
+                        );
+                    }
+                } else if (depth > best.depth + 1) {
+                    if (!result.lines.empty()) {
+                        emit_root_lines_info(
+                            *local_out,
+                            searcher.mem,
+                            keyed_root,
+                            searcher,
+                            result.lines,
+                            static_cast<int>(result.lines.size()),
+                            search_start,
+                            reported_nodes,
+                            reported_tb_hits,
+                            best.depth
+                        );
+                    } else {
+                        emit_iteration_info(
+                            *local_out,
+                            searcher.mem,
+                            keyed_root,
+                            searcher,
+                            best,
+                            result.pv,
+                            result.pv_length,
+                            search_start,
+                            reported_nodes,
+                            reported_tb_hits,
+                            best.depth,
+                            result.score_bound,
+                            1
+                        );
+                    }
                 }
 #if MAGNUS_SEARCHSTATS_OBS
                 const u64 reported_depth_nodes =
@@ -5280,24 +6305,49 @@ void emit_iteration_info(
     result.best.pv_length = result.pv_length;
     for (int i = 0; i < result.pv_length; ++i)
         result.best.pv[i] = result.pv[i];
+    if (!result.lines.empty()) {
+        copy_result_to_root_line(
+            result.lines.front(),
+            result.best,
+            result.pv,
+            result.pv_length,
+            result.score_bound
+        );
+    }
 
     if (out != nullptr &&
         local_limits.report_info &&
         result.pv_length > searched_pv_length) {
-        emit_iteration_info(
-            *out,
-            mem,
-            root,
-            searcher,
-            result.best,
-            result.pv,
-            result.pv_length,
-            search_start,
-            result.best.nodes,
-            result.best.tb_hits,
-            result.best.depth,
-            result.score_bound
-        );
+        if (!result.lines.empty()) {
+            emit_root_lines_info(
+                *out,
+                mem,
+                root,
+                searcher,
+                result.lines,
+                static_cast<int>(result.lines.size()),
+                search_start,
+                result.best.nodes,
+                result.best.tb_hits,
+                result.best.depth
+            );
+        } else {
+            emit_iteration_info(
+                *out,
+                mem,
+                root,
+                searcher,
+                result.best,
+                result.pv,
+                result.pv_length,
+                search_start,
+                result.best.nodes,
+                result.best.tb_hits,
+                result.best.depth,
+                result.score_bound,
+                1
+            );
+        }
     }
 
     return result.best;
@@ -5394,66 +6444,6 @@ void emit_iteration_info(
         return best_index;
     };
 
-    const auto emit_selected_info = [](
-        std::ostream& stream,
-        memory::Memory& local_mem,
-        const Position& local_root,
-        ScoreModel score_model,
-        const IterativeWorkerResult& result,
-        Searcher::clock::time_point info_search_start,
-        u64 nodes,
-        u64 tb_hits
-    ) {
-        const double seconds =
-            std::chrono::duration<double>(
-                Searcher::clock::now() - info_search_start
-            ).count();
-        const u64 nps = seconds > 0.0
-            ? static_cast<u64>(static_cast<double>(nodes) / seconds)
-            : 0ULL;
-        const u64 time_ms = static_cast<u64>(seconds * 1000.0);
-        const int hashfull = memory::tt_hashfull(local_mem.tt);
-
-        stream << "info depth " << result.best.depth
-               << " seldepth " << result.best.seldepth << ' ';
-        append_uci_score(
-            stream,
-            result.best.score,
-            local_root,
-            score_model,
-            result.score_bound
-        );
-        stream << " nodes " << nodes
-               << " nps " << nps
-               << " tbhits " << tb_hits
-               << " hashfull " << hashfull
-               << " time " << time_ms
-               << " multipv 1"
-               << " pv";
-
-        // Validate PV legality before output.
-        Move validated_pv[MAX_PLY]{};
-        int validated_length = result.pv_length;
-        if (validated_length > 0) {
-            std::memcpy(
-                validated_pv,
-                result.pv,
-                static_cast<std::size_t>(validated_length) * sizeof(Move)
-            );
-            validated_length = validate_and_sanitize_pv(
-                local_root,
-                local_mem,
-                validated_pv,
-                validated_length,
-                &stream
-            );
-        }
-        for (int i = 0; i < validated_length; ++i)
-            stream << ' ' << move_to_uci(validated_pv[i]);
-
-        stream << '\n';
-    };
-
     SearchLimits main_limits = limits;
     std::atomic<bool> shared_stop{false};
     std::atomic<u64> shared_nodes{0};
@@ -5465,6 +6455,10 @@ void emit_iteration_info(
     main_limits.stop = &shared_stop;
     main_limits.shared_nodes = &shared_nodes;
     main_limits.shared_tb_hits = &shared_tb_hits;
+    if (main_limits.multipv > 1) {
+        main_limits.use_msv_smp = false;
+        main_limits.msv_info = false;
+    }
     RootMsvShared root_msv_state{};
     if (main_limits.use_msv_smp && main_limits.thread_count > 1) {
         root_msv_seed_moves(root, mem, main_limits, root_msv_state);
@@ -5573,6 +6567,8 @@ void emit_iteration_info(
             0
         );
         SearchResult recovered = best.best;
+        const int score_before_recovery = recovered.score;
+        const memory::Bound bound_before_recovery = best.score_bound;
         (void)recovery_searcher.recover_ponder_pv_full_window(
             root,
             recovered,
@@ -5583,6 +6579,8 @@ void emit_iteration_info(
             recovery_searcher.pv_table[0][0] == recovered.best_move) {
             recovery_searcher.publish_nodes();
             recovery_searcher.publish_tb_hits();
+            if (main_limits.multipv > 1)
+                recovered.score = score_before_recovery;
             best.best = recovered;
             best.pv_length = recovery_searcher.pv_length[0];
             for (int i = 0; i < best.pv_length; ++i) {
@@ -5590,7 +6588,18 @@ void emit_iteration_info(
                 best.best.pv[i] = best.pv[i];
             }
             best.best.pv_length = best.pv_length;
-            best.score_bound = memory::BOUND_EXACT;
+            best.score_bound = main_limits.multipv > 1
+                ? bound_before_recovery
+                : memory::BOUND_EXACT;
+            if (!best.lines.empty()) {
+                copy_result_to_root_line(
+                    best.lines.front(),
+                    best.best,
+                    best.pv,
+                    best.pv_length,
+                    best.score_bound
+                );
+            }
         }
     }
 
@@ -5608,21 +6617,48 @@ void emit_iteration_info(
     best.best.pv_length = best.pv_length;
     for (int i = 0; i < best.pv_length; ++i)
         best.best.pv[i] = best.pv[i];
+    if (!best.lines.empty()) {
+        copy_result_to_root_line(
+            best.lines.front(),
+            best.best,
+            best.pv,
+            best.pv_length,
+            best.score_bound
+        );
+    }
 
     if ((best_index != 0 || best.pv_length > searched_pv_length) &&
         out != nullptr) {
-        emit_selected_info(
-            *out,
-            mem,
-            root,
-            main_searcher.use_mnue()
-                ? ScoreModel::Mnue
-                : (main_searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce),
-            best,
-            search_start,
-            best.best.nodes,
-            best.best.tb_hits
-        );
+        if (!best.lines.empty()) {
+            emit_root_lines_info(
+                *out,
+                mem,
+                root,
+                main_searcher,
+                best.lines,
+                static_cast<int>(best.lines.size()),
+                search_start,
+                best.best.nodes,
+                best.best.tb_hits,
+                best.best.depth
+            );
+        } else {
+            emit_iteration_info(
+                *out,
+                mem,
+                root,
+                main_searcher,
+                best.best,
+                best.pv,
+                best.pv_length,
+                search_start,
+                best.best.nodes,
+                best.best.tb_hits,
+                best.best.depth,
+                best.score_bound,
+                1
+            );
+        }
     }
 
     return best.best;

@@ -250,6 +250,7 @@ struct SearchLimits {
     bool singular_telemetry = false;    // 是否收集 singular extension contextual telemetry
     bool use_msv_smp = false;           // Search-local MSV-SMP root scheduling credit
     bool msv_info = false;              // Emit MSV-SMP debug info strings
+    int multipv = 1;                    // Number of root principal variations to report
 
     // --- 對局歷史（供重複局面檢測）---
     Key game_history_keys[MAX_GAME_HISTORY]{}; // 歷史局面的 Zobrist 鍵值

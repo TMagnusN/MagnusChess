@@ -98,6 +98,7 @@ constexpr int DEFAULT_UCI_HASH_MB = 16;
 constexpr int DEFAULT_UCI_THREADS = 1;
 constexpr int MAX_UCI_THREADS = 512;
 constexpr int DEFAULT_UCI_MULTIPV = 1;
+constexpr int MAX_UCI_MULTIPV = 256;
 constexpr int DEFAULT_UCI_CONTEMPT = 0;
 constexpr int MIN_UCI_CONTEMPT = -10000;
 constexpr int MAX_UCI_CONTEMPT = 10000;
@@ -1264,6 +1265,7 @@ struct UciSession {
     bool use_msv_smp = false;
     bool msv_info = false;
     int threads = DEFAULT_UCI_THREADS;
+    int multipv = DEFAULT_UCI_MULTIPV;
     int contempt = DEFAULT_UCI_CONTEMPT;
     int syzygy_probe_depth = syzygy::DEFAULT_PROBE_DEPTH;
     int syzygy_probe_limit = syzygy::DEFAULT_PROBE_LIMIT;
@@ -1358,12 +1360,12 @@ struct UciSession {
     const bool is_beta = true;
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess 4.5.132 by the Theodore Magnus Øen Nidhar";
+        out << "MagnusChess 5.6.132 by the Theodore Magnus Øen Nidhar";
         out << std::endl;
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess4.5.132";
+        out << "id name MagnusChess5.6.132";
         
         if(is_beta) {
             out << "-dev";
@@ -1377,7 +1379,7 @@ struct UciSession {
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
         out << "option name MultiPV type spin default " << DEFAULT_UCI_MULTIPV
             << " min " << DEFAULT_UCI_MULTIPV
-            << " max " << DEFAULT_UCI_MULTIPV << "\n";
+            << " max " << MAX_UCI_MULTIPV << "\n";
         out << "option name Contempt type spin default " << DEFAULT_UCI_CONTEMPT
             << " min " << MIN_UCI_CONTEMPT
             << " max " << MAX_UCI_CONTEMPT << "\n";
@@ -1555,7 +1557,9 @@ struct UciSession {
                 threads = std::clamp(parsed_threads, 1, MAX_UCI_THREADS);
         }
         else if (name == "MultiPV") {
-            // Advertised for GUI compatibility; search currently supports one principal variation.
+            int parsed_multipv = 0;
+            if (parse_int(value, parsed_multipv))
+                multipv = std::clamp(parsed_multipv, DEFAULT_UCI_MULTIPV, MAX_UCI_MULTIPV);
         }
         else if (name == "Contempt") {
             int parsed_contempt = 0;
@@ -2078,6 +2082,7 @@ struct UciSession {
         limits.singular_telemetry = singular_telemetry;
         limits.use_msv_smp = use_msv_smp;
         limits.msv_info = msv_info;
+        limits.multipv = multipv;
         limits.stop = &stop_requested;
         limits.pondering = &pondering;
         limits.ponder_time_offset_ms = &ponder_time_offset_ms;
