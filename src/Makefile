@@ -31,6 +31,7 @@ endif
 # Embedded P2/P2Pro network - single source of truth for the filename.
 # Changing this updates MnueEmbedded.S, Mnue.cpp, and Uci.cpp automatically.
 MNUE_EMBEDDED_FILE := mm-8adbe41d1.MNUE
+
 # OpenBench/fresh-clone helper: keep the large MNUE out of git.
 # Linux server uses the local file first; other workers fall back to GitHub raw.
 MNUE_EMBEDDED_LOCAL ?= /home/magnus/$(MNUE_EMBEDDED_FILE)
@@ -341,11 +342,11 @@ pgo-use-build: $(PGO_OUTPUT)
 pgo: profile-build
 
 profile-build:
-	@echo Step 1/3. Building instrumented executable ($(PROFGEN_OUTPUT)) ...
+	@echo Step 1/3. Building instrumented executable $(PROFGEN_OUTPUT) ...
 	@$(MAKE) --no-print-directory pgo-step1
 	@echo Step 2/3. Running bench to collect profile data ...
 	@$(MAKE) --no-print-directory pgo-step2
-	@echo Step 3/3. Rebuilding optimized executable with PGO ($(PGO_OUTPUT)) ...
+	@echo Step 3/3. Rebuilding optimized executable with PGO $(PGO_OUTPUT) ...
 	@$(MAKE) --no-print-directory pgo-step3
 
 pgo-step1:
