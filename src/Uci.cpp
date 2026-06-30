@@ -95,9 +95,7 @@ constexpr int DEFAULT_UCI_CONTEMPT = 0;
 constexpr int MIN_UCI_CONTEMPT = -10000;
 constexpr int MAX_UCI_CONTEMPT = 10000;
 constexpr int DEFAULT_BENCH_DEPTH = 12;
-constexpr int DEFAULT_BENCH_MOVETIME_MS = 1000;
 constexpr int MAX_SEARCH_THREADS = 512;
-constexpr std::string_view BENCH_SEPARATOR = "===========================";
 
 constexpr std::array<std::string_view, 50> SEARCH_BENCH_FENS{{
     "rnb1k2r/pp2bp1p/2p1pp2/q7/8/1P6/PBPPQPPP/2KR1BNR w kq - 4 9",
@@ -677,83 +675,13 @@ struct SearchBenchResult {
     return result;
 }
 
-void render_search_bench_summary(
-    std::ostream& out,
-    u64 total_time_ms,
-    u64 total_nodes
-) {
-    const u64 total_nps = total_time_ms > 0
-        ? static_cast<u64>((total_nodes * 1000ULL) / total_time_ms)
-        : 0ULL;
-
-    out << BENCH_SEPARATOR << '\n';
-    out << "Total time (ms) : " << total_time_ms << '\n';
-    out << "Nodes searched  : " << total_nodes << '\n';
-    out << "Nodes/second    : " << total_nps << '\n';
-}
-
-[[nodiscard]] bool run_timed_search_bench(
-    memory::Memory& mem,
-    int movetime_ms,
-    std::size_t threads,
-    bool emit_ponder,
-    std::ostream& out
-) {
-    u64 total_time_ms = 0;
-    u64 total_nodes = 0;
-
-    const int search_threads = std::clamp<int>(
-        static_cast<int>(threads),
-        1,
-        MAX_SEARCH_THREADS
-    );
-    out << "info string Using " << search_threads << " thread"
-        << (search_threads == 1 ? "" : "s") << "\n\n";
-
-    for (std::size_t i = 0; i < SEARCH_BENCH_FENS.size(); ++i) {
-        Position bench_pos{};
-        const std::string_view fen = SEARCH_BENCH_FENS[i];
-        if (!parse_fen(bench_pos, mem, fen)) {
-            out << "info string failed to parse bench FEN: " << fen << '\n';
-            return false;
-        }
-
-        out << "Position: " << (i + 1) << '/' << SEARCH_BENCH_FENS.size()
-            << " (" << fen << ")\n";
-
-        search::SearchLimits limits{};
-        limits.depth = search::MAX_SEARCH_DEPTH;
-        limits.soft_time_ms = movetime_ms;
-        limits.hard_time_ms = movetime_ms;
-        limits.thread_count = search_threads;
-        limits.thread_id = 0;
-        limits.report_info = true;
-        limits.recover_ponder_pv = emit_ponder;
-
-        const SearchBenchResult res =
-            benchmark_search_position(bench_pos, mem, limits, &out);
-
-        total_time_ms += res.time_ms;
-        total_nodes += res.search.nodes;
-
-        out << "bestmove " << search::move_to_uci(res.search.best_move);
-        if (emit_ponder && !res.ponder.empty())
-            out << " ponder " << res.ponder;
-        out << "\n";
-        if (i + 1 != SEARCH_BENCH_FENS.size())
-            out << "\n";
-    }
-
-    render_search_bench_summary(out, total_time_ms, total_nodes);
-    return true;
-}
-
 [[nodiscard]] bool run_compact_search_bench(
     memory::Memory& mem,
     int depth,
     std::size_t hash_mb,
     std::size_t threads,
-    std::ostream& out
+    std::ostream& out,
+    bool quiet = false
 ) {
     const int search_threads = std::clamp<int>(
         static_cast<int>(threads),
@@ -765,17 +693,17 @@ void render_search_bench_summary(
     double total_seconds = 0.0;
     u64 checksum = 0;
 
-    out << "--------------------------------------------------\n";
-    out << "          Nodes       Elapsed             NPS\n";
-    out << "--------------------------------------------------\n";
+    if (!quiet) {
+        out << "--------------------------------------------------\n";
+        out << "          Nodes       Elapsed             NPS\n";
+        out << "--------------------------------------------------\n";
+    }
 
     for (std::size_t i = 0; i < SEARCH_BENCH_FENS.size(); ++i) {
         Position bench_pos{};
         const std::string_view fen = SEARCH_BENCH_FENS[i];
-        if (!parse_fen(bench_pos, mem, fen)) {
-            out << "info string failed to parse bench FEN: " << fen << '\n';
+        if (!parse_fen(bench_pos, mem, fen))
             return false;
-        }
 
         search::SearchLimits limits{};
         limits.depth = depth;
@@ -794,29 +722,35 @@ void render_search_bench_summary(
             ^ (static_cast<u64>(res.search.best_move) << 32)
             ^ static_cast<u64>(static_cast<unsigned>(res.search.score));
 
-        out << std::setw(3) << i
-            << std::setw(12) << res.search.nodes
-            << std::setw(13) << std::fixed << std::setprecision(3)
-            << res.seconds << "s"
-            << std::setw(16) << res.nps << " N/s\n";
+        if (!quiet) {
+            out << std::setw(3) << i
+                << std::setw(12) << res.search.nodes
+                << std::setw(13) << std::fixed << std::setprecision(3)
+                << res.seconds << "s"
+                << std::setw(16) << res.nps << " N/s\n";
+        }
     }
 
     const u64 total_nps = total_seconds > 0.0
         ? static_cast<u64>(static_cast<double>(total_nodes) / total_seconds)
         : 0ULL;
 
-    out << "--------------------------------------------------\n";
-    out << std::setw(15) << total_nodes
-        << std::setw(13) << std::fixed << std::setprecision(3)
-        << total_seconds << "s"
-        << std::setw(16) << total_nps << " N/s\n";
-    out << "--------------------------------------------------\n";
-    out << "depth " << depth
-        << " hash " << hash_mb
-        << " threads " << search_threads
-        << " evaluator " << mnue::p2_eval_name()
-        << " checksum " << checksum
-        << '\n';
+    if (!quiet) {
+        out << "--------------------------------------------------\n";
+        out << std::setw(15) << total_nodes
+            << std::setw(13) << std::fixed << std::setprecision(3)
+            << total_seconds << "s"
+            << std::setw(16) << total_nps << " N/s\n";
+        out << "--------------------------------------------------\n";
+        out << "depth " << depth
+            << " hash " << hash_mb
+            << " threads " << search_threads
+            << " evaluator " << mnue::p2_eval_name()
+            << " checksum " << checksum
+            << '\n';
+    }
+
+    out << "Bench: " << total_nodes << " nodes " << total_nps << " nps\n";
     return true;
 }
 
@@ -877,10 +811,8 @@ void render_search_bench_summary(
     if (mnue::p2_loaded())
         return true;
 
-    if (mnue::p2_embedded_available() && mnue::load_p2_embedded()) {
-        out << "info string loaded embedded " << mnue::p2_eval_name() << '\n';
+    if (mnue::p2_embedded_available() && mnue::load_p2_embedded())
         return true;
-    }
 
     out << "info string no MNUE network available\n";
     const std::string& error = mnue::last_error();
@@ -1284,11 +1216,11 @@ struct UciSession {
         if (!ensure_search_eval_ready(out, "info string mnue unavailable, bench failed"))
             return;
 
-        if (!run_timed_search_bench(
+        if (!run_compact_search_bench(
                 mem,
-                DEFAULT_BENCH_MOVETIME_MS,
+                DEFAULT_BENCH_DEPTH,
+                DEFAULT_UCI_HASH_MB,
                 static_cast<std::size_t>(threads),
-                enable_ponder,
                 out
             ))
             out << "info string bench failed\n";
@@ -1593,7 +1525,8 @@ int run_bench(int argc, char** argv) {
             depth,
             static_cast<std::size_t>(hash_mb),
             static_cast<std::size_t>(clamped_threads),
-            std::cout
+            std::cout,
+            true
         );
         memory::memory_free(mem);
         return ok ? 0 : 1;

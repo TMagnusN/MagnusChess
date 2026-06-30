@@ -1,4 +1,4 @@
-CXX := g++
+﻿CXX := g++
 CC := gcc
 TARGET := MagnusChess
 
@@ -216,9 +216,20 @@ else
 	OUTPUT_BASENAME := $(TARGET)-$(EFFECTIVE_PROFILE)
 endif
 
-OUTPUT := $(BUILD_DIR)/$(OUTPUT_BASENAME)$(EXEEXT)
+DEFAULT_OUTPUT := $(BUILD_DIR)/$(OUTPUT_BASENAME)$(EXEEXT)
+
+# OpenBench calls make with EXE=<expected-binary-name>.
+# When EXE is provided, write the final engine exactly there instead of
+# always writing build/MagnusChess[.exe].
+ifeq ($(strip $(EXE)),)
+	OUTPUT := $(DEFAULT_OUTPUT)
+	PGO_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-pgo$(EXEEXT)
+else
+	OUTPUT := $(EXE)
+	PGO_OUTPUT := $(EXE)
+endif
+
 PROFGEN_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-profgen$(EXEEXT)
-PGO_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-pgo$(EXEEXT)
 
 ifeq ($(PGO),1)
 	AUTO_BUILD_TARGET := profile-build
